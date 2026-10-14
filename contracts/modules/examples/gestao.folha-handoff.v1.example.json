@@ -7,13 +7,6 @@
   "emittedAt": "2026-10-31T23:59:59-03:00",
   "entries": [
     {
-      "entryKey": "salarios-a-pagar",
-      "accountKey": "passivo-salarios",
-      "debitMinor": "0",
-      "creditMinor": "4500000",
-      "description": "Salários líquidos competência 2026-10"
-    },
-    {
       "entryKey": "despesa-salarios",
       "accountKey": "despesa-pessoal",
       "debitMinor": "6000000",
@@ -21,18 +14,46 @@
       "description": "Despesa bruta de salários competência 2026-10"
     },
     {
-      "entryKey": "inss-patronal",
+      "entryKey": "despesa-inss-patronal",
+      "accountKey": "despesa-encargos",
+      "debitMinor": "1200000",
+      "creditMinor": "0",
+      "description": "Despesa INSS patronal competência 2026-10"
+    },
+    {
+      "entryKey": "despesa-fgts",
+      "accountKey": "despesa-encargos",
+      "debitMinor": "480000",
+      "creditMinor": "0",
+      "description": "Despesa FGTS competência 2026-10"
+    },
+    {
+      "entryKey": "salarios-a-pagar",
+      "accountKey": "passivo-salarios",
+      "debitMinor": "0",
+      "creditMinor": "4500000",
+      "description": "Salários líquidos a pagar competência 2026-10"
+    },
+    {
+      "entryKey": "inss-patronal-a-pagar",
       "accountKey": "passivo-encargos",
       "debitMinor": "0",
       "creditMinor": "1200000",
-      "description": "INSS patronal competência 2026-10"
+      "description": "INSS patronal a recolher competência 2026-10"
     },
     {
-      "entryKey": "fgts",
+      "entryKey": "fgts-a-pagar",
       "accountKey": "passivo-encargos",
       "debitMinor": "0",
       "creditMinor": "480000",
-      "description": "FGTS competência 2026-10"
+      "description": "FGTS a recolher competência 2026-10"
+    },
+    {
+      "entryKey": "inss-funcionario-a-pagar",
+      "accountKey": "passivo-encargos",
+      "debitMinor": "0",
+      "creditMinor": "1500000",
+      "description": "INSS retido dos funcionários a recolher competência 2026-10"
     }
   ],
   "source": {
