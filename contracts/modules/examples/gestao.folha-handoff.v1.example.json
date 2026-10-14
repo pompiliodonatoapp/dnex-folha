@@ -1,0 +1,41 @@
+{
+  "contractVersion": "gestao.folha-handoff.v1",
+  "handoffKey": "folha-handoff-2026-10-comp-001",
+  "accountId": "acc-don-app-001",
+  "payrollRunId": "run-2026-10-001",
+  "competence": "2026-10",
+  "emittedAt": "2026-10-31T23:59:59-03:00",
+  "entries": [
+    {
+      "entryKey": "salarios-a-pagar",
+      "accountKey": "passivo-salarios",
+      "debitMinor": "0",
+      "creditMinor": "4500000",
+      "description": "Salários líquidos competência 2026-10"
+    },
+    {
+      "entryKey": "despesa-salarios",
+      "accountKey": "despesa-pessoal",
+      "debitMinor": "6000000",
+      "creditMinor": "0",
+      "description": "Despesa bruta de salários competência 2026-10"
+    },
+    {
+      "entryKey": "inss-patronal",
+      "accountKey": "passivo-encargos",
+      "debitMinor": "0",
+      "creditMinor": "1200000",
+      "description": "INSS patronal competência 2026-10"
+    },
+    {
+      "entryKey": "fgts",
+      "accountKey": "passivo-encargos",
+      "debitMinor": "0",
+      "creditMinor": "480000",
+      "description": "FGTS competência 2026-10"
+    }
+  ],
+  "source": {
+    "repository": "pompiliodonatoapp/dnex-folha"
+  }
+}

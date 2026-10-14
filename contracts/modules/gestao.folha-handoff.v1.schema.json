@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dnex.app.br/contracts/gestao.folha-handoff.v1.schema.json",
+  "title": "DNEX Folha Handoff v1",
+  "description": "Contrato de integração entre DNEX Folha (produto standalone) e DNEX Gestão. Eventos de contabilização de folha enviados ao subledger financeiro do Gestão.",
+  "type": "object",
+  "required": ["contractVersion", "handoffKey", "accountId", "payrollRunId", "competence", "emittedAt", "entries"],
+  "properties": {
+    "contractVersion": { "const": "gestao.folha-handoff.v1" },
+    "handoffKey": { "type": "string", "pattern": "^[a-z0-9-]{1,64}$" },
+    "accountId": { "type": "string", "pattern": "^[a-z0-9-]{1,64}$" },
+    "payrollRunId": { "type": "string", "pattern": "^[a-z0-9-]{1,64}$" },
+    "competence": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}$" },
+    "emittedAt": { "type": "string", "format": "date-time" },
+    "entries": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["entryKey", "accountKey", "debitMinor", "creditMinor", "description"],
+        "properties": {
+          "entryKey": { "type": "string", "pattern": "^[a-z0-9-]{1,64}$" },
+          "accountKey": { "type": "string", "pattern": "^[a-z0-9-]{1,64}$" },
+          "debitMinor": { "type": "string", "pattern": "^[0-9]+$" },
+          "creditMinor": { "type": "string", "pattern": "^[0-9]+$" },
+          "description": { "type": "string", "maxLength": 500 }
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "required": ["repository"],
+      "properties": {
+        "repository": { "const": "pompiliodonatoapp/dnex-folha" }
+      }
+    }
+  }
+}
