@@ -1,4 +1,4 @@
--- DNEX Folha — Bootstrap mínimo para replay das migrations 0014..0022 em CI.
+-- DNEX Folha — Bootstrap mínimo para replay das migrations 0014..0024 em CI.
 -- Cria SOMENTE objetos externos ao repositório que as migrations referenciam.
 -- Cada stub tem comentário com migration:linha que o exige.
 -- NÃO usar em produção; apenas para testes de replay do zero.
@@ -49,6 +49,26 @@ $$;
 -- dnex_gestao_folha_worker: criada pela própria migration 0014:12-18,
 -- mas listamos aqui para garantir existência antes de qualquer GRANT antecipado.
 -- A migration 0014 faz IF NOT EXISTS, então é idempotente.
+
+-- dnex_folha_ci: papel de teste dedicado para CI. ÚNICO papel para o qual
+-- folha.current_account_id() aceita a reserva por parâmetro de sessão
+-- (folha.account_id), a partir da migration 0024.
+-- NÃO existe em produção e NENHUMA migration o cria: só este bootstrap.
+-- Sem LOGIN, sem SUPERUSER e sem BYPASSRLS (as policies valem para ele).
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'dnex_folha_ci') THEN
+    CREATE ROLE dnex_folha_ci NOLOGIN NOSUPERUSER NOBYPASSRLS INHERIT;
+  END IF;
+END
+$$;
+
+-- Mesmas permissões de tabela e função do worker, sem repetir a lista de GRANTs
+-- (que só poderia rodar depois das migrations): o papel de teste é membro do
+-- worker e herda o que as migrations concedem a ele, hoje e no futuro.
+-- A herança não torna o worker um papel de teste: current_user continua sendo
+-- o papel efetivo da sessão.
+GRANT dnex_gestao_folha_worker TO dnex_folha_ci;
 
 -- ---------------------------------------------------------------------------
 -- 2. Schema extensions (para pgcrypto)
