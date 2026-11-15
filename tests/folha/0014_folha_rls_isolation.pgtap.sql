@@ -35,10 +35,10 @@ SELECT has_role('dnex_gestao_folha_worker', 'Role dnex_gestao_folha_worker deve 
 -- ---------------------------------------------------------------------------
 -- 3. Tabelas têm RLS habilitado
 -- ---------------------------------------------------------------------------
-SELECT row_security_enabled('folha.employee'), 'employee tem RLS enabled';
-SELECT row_security_enabled('folha.payroll_run'), 'payroll_run tem RLS enabled';
-SELECT row_security_enabled('folha.payroll_result'), 'payroll_result tem RLS enabled';
-SELECT row_security_enabled('folha.calculation_trace'), 'calculation_trace tem RLS enabled';
+SELECT ok((SELECT relrowsecurity FROM pg_class WHERE oid = 'folha.employee'::regclass), 'employee tem RLS enabled');
+SELECT ok((SELECT relrowsecurity FROM pg_class WHERE oid = 'folha.payroll_run'::regclass), 'payroll_run tem RLS enabled');
+SELECT ok((SELECT relrowsecurity FROM pg_class WHERE oid = 'folha.payroll_result'::regclass), 'payroll_result tem RLS enabled');
+SELECT ok((SELECT relrowsecurity FROM pg_class WHERE oid = 'folha.calculation_trace'::regclass), 'calculation_trace tem RLS enabled');
 
 -- ---------------------------------------------------------------------------
 -- 4. Tabelas têm FORCE ROW LEVEL SECURITY
