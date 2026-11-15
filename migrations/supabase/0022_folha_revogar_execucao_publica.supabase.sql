@@ -3,15 +3,12 @@
 -- após criação ou recriação sem REVOKE explícito. Esta migration garante least-privilege idempotente.
 -- Funções criadas fora deste repositório (dnex-gestao, migration 0027) são protegidas com to_regprocedure().
 --
--- Rollback (reverter grants para estado anterior — NÃO recomendado em produção):
---   GRANT EXECUTE ON FUNCTION folha.build_esocial_s1210(uuid) TO PUBLIC;
---   GRANT EXECUTE ON FUNCTION folha.build_esocial_s1299(uuid,date) TO PUBLIC;
---   GRANT EXECUTE ON FUNCTION folha.build_esocial_s2299(uuid,date) TO PUBLIC;
---   GRANT EXECUTE ON FUNCTION folha.build_reinf_r2010(uuid,date) TO PUBLIC;
---   GRANT EXECUTE ON FUNCTION folha.build_reinf_r4010(uuid,date) TO PUBLIC;
---   GRANT EXECUTE ON FUNCTION folha.dispatch_folha_completa(uuid) TO PUBLIC;
---   GRANT EXECUTE ON FUNCTION folha.dispatch_folha_completa(uuid,date) TO PUBLIC;
---   GRANT EXECUTE ON FUNCTION folha.dashboard_completo(uuid) TO authenticated;
+-- service_role: em producao (medido em 15/11/2026) ja executava as 7 funcoes de despacho, por heranca de PUBLIC.
+-- O GRANT explicito abaixo apenas preserva esse acesso do papel de servico; nao amplia o que ele tinha.
+-- dashboard_completo nao e concedida a service_role (nao tinha).
+--
+-- Reversao: nao ha estado anterior desejavel (era EXECUTE para PUBLIC). Se uma tela precisar ler o dashboard
+-- com o papel authenticated, crie uma funcao que derive a conta da sessao em vez de recebe-la por parametro.
 BEGIN;
 
 -- ---------------------------------------------------------------------------
