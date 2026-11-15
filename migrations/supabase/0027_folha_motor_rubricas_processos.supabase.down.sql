@@ -208,6 +208,62 @@ END;
 $$;
 
 DROP FUNCTION folha.folha_gravar_resultado(uuid, uuid, uuid, date, jsonb);
+DROP FUNCTION folha.pendencia_tipo(text);
+
+-- dispatch_folha_completa: corpo da 0020
+CREATE OR REPLACE FUNCTION folha.dispatch_folha_completa(
+  p_run_id uuid
+) RETURNS TABLE (
+  esocial_events_dispatched integer,
+  contabil_events_dispatched integer
+)
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog, folha
+AS $$
+DECLARE
+  v_result record;
+  v_esocial_count integer := 0;
+  v_contabil_count integer := 0;
+  v_competencia date;
+BEGIN
+  SELECT competencia INTO v_competencia
+  FROM folha.payroll_run
+  WHERE run_id = p_run_id;
+
+  IF v_competencia IS NULL THEN
+    RAISE EXCEPTION 'payroll_run % não encontrado', p_run_id;
+  END IF;
+
+  FOR v_result IN
+    SELECT result_id FROM folha.payroll_result WHERE run_id = p_run_id
+  LOOP
+    -- Dispatch eSocial S-1200
+    PERFORM folha.dispatch_esocial_event(
+      p_run_id,
+      v_result.result_id,
+      'S-1200',
+      v_competencia,
+      folha.build_esocial_s1200(v_result.result_id),
+      NULL
+    );
+    v_esocial_count := v_esocial_count + 1;
+
+    -- Dispatch contábil
+    PERFORM folha.dispatch_accounting_event(
+      p_run_id,
+      v_result.result_id,
+      'folha_mensal',
+      folha.build_contabil_folha(v_result.result_id)
+    );
+    v_contabil_count := v_contabil_count + 1;
+  END LOOP;
+
+  esocial_events_dispatched := v_esocial_count;
+  contabil_events_dispatched := v_contabil_count;
+  RETURN NEXT;
+END;
+$$;
+
 DROP FUNCTION folha.folha_rescisao_calcular(uuid, uuid, uuid, date, date, integer);
 DROP FUNCTION folha.folha_ferias_calcular(uuid, uuid, uuid, date, date, integer);
 DROP FUNCTION folha.folha_13o_calcular(uuid, uuid, uuid, text, date, date, integer);

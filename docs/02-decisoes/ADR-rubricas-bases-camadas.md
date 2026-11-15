@@ -29,8 +29,9 @@ fechamento.
    `run_payroll_employee`. Várias folhas por competência (unicidade por conta, empregador, competência, tipo e sequência).
    13º, férias e rescisão continuam nas funções da 0023 e passam a gravar itens por rubrica.
 6. **Resultado como dado:** itens por rubrica, bases apuradas e pendências em tabelas próprias.
-7. **Trava de fechamento:** folha com pendência sem liberação registrada (quem, quando, motivo, sessão; também na auditoria) não
-   é aprovada nem fechada. A folha só anda um estado por vez, congela identidade e totais depois de calculada, e fechar exige
+7. **Trava de fechamento:** folha com pendência aberta não é aprovada, fechada nem despachada. A pendência tem tipo:
+   `a_validar` e `conferencia` são liberáveis com registro (quem, quando, motivo, sessão; também na auditoria); `pendencia` de
+   cálculo (valor sabidamente errado) não é liberável. A identidade de quem libera ainda é texto livre (bloqueio de produção). A folha só anda um estado por vez, congela identidade e totais depois de calculada, e fechar exige
    data de pagamento. Só o motor grava resultado.
 
 ## Alternativas descartadas

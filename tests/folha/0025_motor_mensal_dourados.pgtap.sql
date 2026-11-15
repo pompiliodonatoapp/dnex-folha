@@ -185,11 +185,19 @@ WITH novo AS (
     ('e0000000-0000-0000-0000-000000000025', '2026-09-01', NULL)
   RETURNING run_id, competencia)
 INSERT INTO f SELECT to_char(competencia, 'YYYY-MM'), run_id FROM novo;
+-- Fixture da fatia 4 (migration 0027): folha só nasce em rascunho e só fecha pelo fluxo
+-- (cálculo, aprovação, fechamento). Este cenário só precisa de UMA folha já fechada para o
+-- negativo "folha fechada não recebe cálculo": ela entra como superusuário, com os gatilhos
+-- desligados só para este INSERT. O esperado do negativo não mudou.
+RESET SESSION AUTHORIZATION;
+SET LOCAL session_replication_role = replica;
 WITH novo AS (
   INSERT INTO folha.payroll_run (account_id, competencia, data_pagamento, status)
   VALUES ('e0000000-0000-0000-0000-000000000025', '2026-08-01', '2026-08-31', 'closed')
   RETURNING run_id)
 INSERT INTO f SELECT 'fechada', run_id FROM novo;
+SET LOCAL session_replication_role = origin;
+SET LOCAL SESSION AUTHORIZATION dnex_folha_ci_login;
 WITH novo AS (
   INSERT INTO folha.payroll_run (account_id, competencia, data_pagamento, employer_id)
   SELECT 'e0000000-0000-0000-0000-000000000025', '2026-07-01', '2026-07-31', k.employer_id

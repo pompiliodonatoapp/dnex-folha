@@ -2,7 +2,7 @@
 --
 -- AVISO: devolve o cadastro ao estado da 0025: uma folha por conta e competência, rubrica com
 -- três indicadores de incidência, sem bases, camadas, lançamentos nem pendências como dado, e
--- com as tabelas de INSS e de salário mínimo de 2026 de novo com vigência aberta (o defeito
+-- com as tabelas de INSS, de salário mínimo e de IRRF de 2026 de novo com vigência aberta (o defeito
 -- que a 0026 corrige). Use só para desfazer uma aplicação que deu errado e reaplique em
 -- seguida. Não é um estado para operar.
 --
@@ -67,7 +67,7 @@ $$;
 -- Vigências: reabre só o que a 0026 fechou.
 UPDATE folha.tax_table_version
    SET vigencia_fim = NULL
- WHERE tipo IN ('inss', 'salario_minimo') AND vigencia_inicio = '2026-01-01' AND vigencia_fim = '2026-12-31';
+ WHERE tipo IN ('inss', 'salario_minimo', 'irrf') AND vigencia_inicio = '2026-01-01' AND vigencia_fim = '2026-12-31';
 
 -- Resultado e folha
 DROP TABLE folha.payroll_pendency;
@@ -89,6 +89,7 @@ ALTER TABLE folha.payroll_run
 DROP TABLE folha.external_remuneration;
 DROP TABLE folha.contract_leave;
 DROP TABLE folha.payroll_entry;
+DROP FUNCTION folha.payroll_entry_consumido();
 DROP TABLE folha.rubric_rule;
 DROP FUNCTION folha.formula_valida(jsonb, integer);
 ALTER TABLE folha.employment_contract
@@ -113,6 +114,7 @@ DELETE FROM folha.earning_deduction_code
                   'RESC_INDENIZACAO_ART479', 'INSS_13_SALARIO', 'IRRF_13_SALARIO', 'IRRF_FERIAS',
                   'DECIMO_TERCEIRO_ADIANT_COMP', 'RESC_DESCONTO_AVISO_PREVIO', 'RESC_DESCONTO_ART480');
 ALTER TABLE folha.earning_deduction_code
+  DROP COLUMN ativa,
   DROP COLUMN ordem_calculo,
   DROP COLUMN forma_calculo,
   DROP COLUMN tipo_rubrica;

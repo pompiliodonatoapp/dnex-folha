@@ -21,7 +21,7 @@
 --      dos processos de 13º, férias e rescisão (payroll_process_input), itens e bases do
 --      resultado como dado (payroll_result_item, payroll_result_base), origem da regra na
 --      memória de cálculo (calculation_trace) e pendências consultáveis (payroll_pendency).
---   6. Fecha em 31/12/2026 a vigência das tabelas de INSS e de salário mínimo de 2026 (0015),
+--   6. Fecha em 31/12/2026 a vigência das tabelas de INSS, salário mínimo e IRRF de 2026 (0015),
 --      que estavam abertas e serviriam 2027 sem erro.
 --   7. Migra as rubricas da 0017 para o modelo novo e cria as rubricas dos processos.
 --   8. RLS com FORCE, policies com (SELECT folha.current_account_id()) e ACL com REVOKE
@@ -44,6 +44,8 @@ SET LOCAL lock_timeout = '5s';
 -- 0. Pré-condições
 -- ---------------------------------------------------------------------------
 DO $$
+DECLARE
+  v_lista text;
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles
                   WHERE rolname = current_user AND (rolsuper OR rolbypassrls)) THEN
@@ -55,19 +57,27 @@ BEGIN
     RAISE EXCEPTION '0026: faltam objetos da migration 0025'
       USING ERRCODE = 'object_not_in_prerequisite_state';
   END IF;
-  IF EXISTS (SELECT 1 FROM folha.earning_deduction_code
-              WHERE account_id IS NULL GROUP BY codigo HAVING count(*) > 1) THEN
-    RAISE EXCEPTION '0026: há rubrica global com código repetido; resolva antes de criar o índice único'
+  -- As três conferências abaixo dizem QUAIS códigos conflitam: nada é limpo por esta migration.
+  SELECT string_agg(x.codigo || ' (' || x.n || ' linhas)', ', ' ORDER BY x.codigo) INTO v_lista
+    FROM (SELECT codigo, count(*) AS n FROM folha.earning_deduction_code
+           WHERE account_id IS NULL GROUP BY codigo HAVING count(*) > 1) x;
+  IF v_lista IS NOT NULL THEN
+    RAISE EXCEPTION '0026: rubrica global com código repetido; resolva antes de criar o índice único. Códigos: %', v_lista
       USING ERRCODE = 'object_not_in_prerequisite_state';
   END IF;
-  IF EXISTS (SELECT 1 FROM folha.earning_deduction_code WHERE is_global IS DISTINCT FROM (account_id IS NULL)) THEN
-    RAISE EXCEPTION '0026: há rubrica com is_global incoerente com a conta (global = conta nula); corrija antes'
+  SELECT string_agg(e.codigo || ' (conta ' || COALESCE(e.account_id::text, 'nula') || ', is_global ' || e.is_global || ')', ', ' ORDER BY e.codigo)
+    INTO v_lista
+    FROM folha.earning_deduction_code e WHERE e.is_global IS DISTINCT FROM (e.account_id IS NULL);
+  IF v_lista IS NOT NULL THEN
+    RAISE EXCEPTION '0026: rubrica com is_global incoerente com a conta (global = conta nula); corrija antes. Rubricas: %', v_lista
       USING ERRCODE = 'object_not_in_prerequisite_state';
   END IF;
-  IF EXISTS (SELECT 1 FROM folha.earning_deduction_code c
-               JOIN folha.earning_deduction_code g ON g.account_id IS NULL AND g.codigo = c.codigo
-              WHERE c.account_id IS NOT NULL) THEN
-    RAISE EXCEPTION '0026: há rubrica de conta com o mesmo código de rubrica global; renomeie antes (o motor resolve a rubrica pelo código)'
+  SELECT string_agg(DISTINCT c.codigo, ', ' ORDER BY c.codigo) INTO v_lista
+    FROM folha.earning_deduction_code c
+    JOIN folha.earning_deduction_code g ON g.account_id IS NULL AND g.codigo = c.codigo
+   WHERE c.account_id IS NOT NULL;
+  IF v_lista IS NOT NULL THEN
+    RAISE EXCEPTION '0026: rubrica de conta com o mesmo código de rubrica global; renomeie antes (o motor resolve a rubrica pelo código). Códigos: %', v_lista
       USING ERRCODE = 'object_not_in_prerequisite_state';
   END IF;
   IF EXISTS (SELECT 1 FROM folha.payroll_run WHERE EXTRACT(DAY FROM competencia) <> 1) THEN
@@ -105,14 +115,20 @@ LANGUAGE plpgsql
 SET search_path = pg_catalog, folha
 AS $$
 BEGIN
-  IF NEW.account_id IS DISTINCT FROM OLD.account_id THEN
+  IF TG_OP = 'UPDATE' AND NEW.account_id IS DISTINCT FROM OLD.account_id THEN
     RAISE EXCEPTION '%: a conta da linha não pode ser alterada', TG_TABLE_NAME USING ERRCODE = 'check_violation';
+  END IF;
+  -- Base de conta não repete código de base global (o motor lê a base pelo código).
+  IF NEW.account_id IS NOT NULL
+     AND EXISTS (SELECT 1 FROM folha.calculation_base g WHERE g.account_id IS NULL AND g.codigo = NEW.codigo) THEN
+    RAISE EXCEPTION 'calculation_base: o código % é de base global e não pode ser repetido por conta', NEW.codigo
+      USING ERRCODE = 'check_violation';
   END IF;
   RETURN NEW;
 END;
 $$;
 CREATE TRIGGER trg_calculation_base_conta_imutavel
-  BEFORE UPDATE ON folha.calculation_base
+  BEFORE INSERT OR UPDATE ON folha.calculation_base
   FOR EACH ROW EXECUTE FUNCTION folha.conta_imutavel();
 
 INSERT INTO folha.calculation_base (codigo, descricao, finalidade) VALUES
@@ -199,7 +215,8 @@ ALTER TABLE folha.earning_deduction_code
     CONSTRAINT earning_deduction_code_forma_calculo_check
       CHECK (forma_calculo IN ('valor_fixo', 'percentual_base', 'quantidade_valor', 'formula', 'apuracao_motor')),
   ADD COLUMN ordem_calculo integer NOT NULL DEFAULT 500
-    CONSTRAINT earning_deduction_code_ordem_check CHECK (ordem_calculo BETWEEN 1 AND 9999);
+    CONSTRAINT earning_deduction_code_ordem_check CHECK (ordem_calculo BETWEEN 1 AND 9999),
+  ADD COLUMN ativa boolean NOT NULL DEFAULT true;   -- rubrica inativa não entra em cálculo
 
 COMMENT ON COLUMN folha.earning_deduction_code.incidencia_inss IS
   'Legado da 0014. O motor não lê: a incidência vale por código e vigência em folha.rubric_incidence.';
@@ -273,16 +290,18 @@ BEGIN
     RAISE EXCEPTION '%: a conta da linha não pode ser alterada', TG_TABLE_NAME USING ERRCODE = 'check_violation';
   END IF;
   -- Base de cálculo apontada pela linha: global ou da mesma conta (a FK é simples).
+  -- As mensagens não distinguem "não existe" de "é de outra conta": quem grava não descobre
+  -- por aqui se um identificador alheio existe.
   IF v_base IS NOT NULL THEN
     SELECT b.account_id INTO v_conta_base FROM folha.calculation_base b WHERE b.base_id = v_base;
-    IF FOUND AND v_conta_base IS NOT NULL AND v_conta_base IS DISTINCT FROM NEW.account_id THEN
-      RAISE EXCEPTION '%: a base de cálculo é de outra conta', TG_TABLE_NAME USING ERRCODE = 'check_violation';
+    IF NOT FOUND OR (v_conta_base IS NOT NULL AND v_conta_base IS DISTINCT FROM NEW.account_id) THEN
+      RAISE EXCEPTION '%: base de cálculo inexistente ou indisponível para esta conta', TG_TABLE_NAME USING ERRCODE = 'check_violation';
     END IF;
   END IF;
   SELECT e.account_id INTO v_conta_rubrica
     FROM folha.earning_deduction_code e WHERE e.code_id = NEW.code_id;
   IF NOT FOUND THEN
-    RAISE EXCEPTION 'Rubrica % não existe', NEW.code_id USING ERRCODE = 'foreign_key_violation';
+    RAISE EXCEPTION '%: rubrica inexistente ou indisponível para esta conta', TG_TABLE_NAME USING ERRCODE = 'check_violation';
   END IF;
   IF v_modo = 'mesma_conta' THEN
     IF v_conta_rubrica IS DISTINCT FROM NEW.account_id THEN
@@ -290,7 +309,7 @@ BEGIN
         USING ERRCODE = 'check_violation';
     END IF;
   ELSIF v_conta_rubrica IS NOT NULL AND v_conta_rubrica IS DISTINCT FROM NEW.account_id THEN
-    RAISE EXCEPTION '%: a rubrica é de outra conta', TG_TABLE_NAME USING ERRCODE = 'check_violation';
+    RAISE EXCEPTION '%: rubrica inexistente ou indisponível para esta conta', TG_TABLE_NAME USING ERRCODE = 'check_violation';
   END IF;
   RETURN NEW;
 END;
@@ -306,6 +325,8 @@ CREATE TABLE folha.rubric_incidence (
   vigencia_inicio date NOT NULL,
   vigencia_fim date,
   fonte text,
+  -- a_validar = incidência não conferida na fonte: usada no cálculo, vira pendência na folha.
+  status_validacao text NOT NULL DEFAULT 'a_validar' CHECK (status_validacao IN ('validado', 'a_validar')),
   created_at timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT rubric_incidence_codigo_fk FOREIGN KEY (tributo, incidencia_codigo)
     REFERENCES folha.incidence_code (tributo, codigo),
@@ -452,6 +473,7 @@ CREATE TABLE folha.rubric_rule (
     OR (forma_calculo = 'quantidade_valor' AND valor_unitario IS NOT NULL AND valor IS NULL AND percentual IS NULL AND base_id IS NULL AND formula IS NULL)
     OR (forma_calculo = 'formula'          AND formula IS NOT NULL AND valor IS NULL AND percentual IS NULL AND base_id IS NULL AND valor_unitario IS NULL)),
   CONSTRAINT rubric_rule_formula_valida CHECK (formula IS NULL OR folha.formula_valida(formula)),
+  CONSTRAINT rubric_rule_formula_tamanho CHECK (formula IS NULL OR pg_column_size(formula) <= 4000),
   -- Lançamento automático precisa de valor que não dependa de quantidade informada.
   CONSTRAINT rubric_rule_automatica_sem_quantidade CHECK (NOT automatica OR forma_calculo <> 'quantidade_valor'),
   CONSTRAINT rubric_rule_automatica_sem_variavel_de_lancamento
@@ -603,6 +625,31 @@ CREATE TABLE folha.payroll_result_item (
   UNIQUE (result_id, ordem)
 );
 
+-- O item aponta o lançamento que o gerou (entry_id). Lançamento já pago por folha não
+-- cancelada não é alterado nem apagado, e o motor não o paga de novo em outra folha.
+CREATE FUNCTION folha.payroll_entry_consumido() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog, folha
+SET row_security = off
+AS $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM folha.payroll_result_item i
+               JOIN folha.payroll_result pr ON pr.result_id = i.result_id
+               JOIN folha.payroll_run r ON r.run_id = pr.run_id
+              WHERE i.entry_id = OLD.entry_id AND r.status <> 'cancelled') THEN
+    RAISE EXCEPTION 'Lançamento % já foi calculado em folha não cancelada e não pode ser alterado nem apagado', OLD.entry_id;
+  END IF;
+  IF TG_OP = 'DELETE' THEN
+    RETURN OLD;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+CREATE TRIGGER trg_payroll_entry_consumido
+  BEFORE UPDATE OR DELETE ON folha.payroll_entry
+  FOR EACH ROW EXECUTE FUNCTION folha.payroll_entry_consumido();
+CREATE INDEX idx_payroll_result_item_entry ON folha.payroll_result_item (entry_id) WHERE entry_id IS NOT NULL;
+
 -- Bases apuradas no resultado.
 CREATE TABLE folha.payroll_result_base (
   account_id uuid NOT NULL,
@@ -623,9 +670,13 @@ ALTER TABLE folha.calculation_trace
       CHECK (camada_regra IN ('motor', 'lancamento', 'empresa', 'convencao', 'contrato')),
   ADD COLUMN rule_id uuid REFERENCES folha.rubric_rule (rule_id);
 
--- Pendências como dado. tipo: a_validar (regra ou parâmetro não conferido na fonte) ou
--- pendencia (decisão ou dado que falta no cálculo). Sem liberação registrada, a folha não
--- é aprovada nem fechada (trava na 0027).
+-- Pendências como dado. tipo:
+--   a_validar   = regra ou parâmetro não conferido na fonte: liberável, com responsável e motivo;
+--   conferencia = aviso das funções de cálculo que pede conferência humana (ex.: INSS provisório
+--                 do recibo de férias): liberável, com responsável e motivo;
+--   pendencia   = o valor calculado está sabidamente errado ou incompleto (ex.: salário sem
+--                 abater o gozo de férias): NÃO é liberável; some corrigindo e recalculando.
+-- Com pendência aberta, a folha não é aprovada nem fechada (trava na 0027).
 CREATE TABLE folha.payroll_pendency (
   pendency_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   account_id uuid NOT NULL,
@@ -633,7 +684,7 @@ CREATE TABLE folha.payroll_pendency (
   result_id uuid NOT NULL,
   contract_id uuid NOT NULL,
   codigo text NOT NULL CHECK (btrim(codigo) <> ''),
-  tipo text NOT NULL CHECK (tipo IN ('a_validar', 'pendencia')),
+  tipo text NOT NULL CHECK (tipo IN ('a_validar', 'conferencia', 'pendencia')),
   created_at timestamptz NOT NULL DEFAULT now(),
   liberada_em timestamptz,
   liberada_por text,
@@ -655,9 +706,11 @@ CREATE INDEX idx_payroll_pendency_aberta ON folha.payroll_pendency (account_id, 
 
 -- ===========================================================================
 -- 6. Vigências abertas (bloqueio de produção 3)
---    As tabelas de INSS e de salário mínimo de 2026 da 0015 não tinham fim de vigência:
---    uma competência de 2027 seria calculada com os valores de 2026 sem erro. Fecham em
---    31/12/2026; sem a tabela do ano, calc_inss levanta "Tabela INSS não encontrada".
+--    As tabelas de INSS, de salário mínimo e do IRRF de 2026 da 0015 não tinham fim de
+--    vigência: competência ou pagamento de 2027 seria calculado com os valores de 2026 sem
+--    erro. Fecham em 31/12/2026; sem a tabela do ano, o motor levanta "Tabela INSS não
+--    encontrada" / "Tabela IRRF não encontrada". A tabela do IRRF não muda todo ano por regra,
+--    mas quem diz que a de 2026 vale em 2027 é quem cadastra a de 2027, com o ato.
 -- ===========================================================================
 DO $$
 DECLARE
@@ -665,13 +718,13 @@ DECLARE
 BEGIN
   UPDATE folha.tax_table_version
      SET vigencia_fim = '2026-12-31'
-   WHERE tipo IN ('inss', 'salario_minimo')
+   WHERE tipo IN ('inss', 'salario_minimo', 'irrf')
      AND vigencia_inicio = '2026-01-01'
      AND vigencia_fim IS NULL;
   GET DIAGNOSTICS v_linhas = ROW_COUNT;
   IF EXISTS (SELECT 1 FROM folha.tax_table_version
-              WHERE tipo IN ('inss', 'salario_minimo') AND vigencia_fim IS NULL) THEN
-    RAISE EXCEPTION '0026: ainda há tabela de INSS ou de salário mínimo com vigência aberta (linhas fechadas: %)', v_linhas
+              WHERE tipo IN ('inss', 'salario_minimo', 'irrf') AND vigencia_fim IS NULL) THEN
+    RAISE EXCEPTION '0026: ainda há tabela de INSS, de salário mínimo ou de IRRF com vigência aberta (linhas fechadas: %)', v_linhas
       USING ERRCODE = 'object_not_in_prerequisite_state';
   END IF;
 END
@@ -753,6 +806,43 @@ SELECT e.account_id, e.code_id, t.tributo,
   CROSS JOIN LATERAL (VALUES
     ('previdencia', e.incidencia_inss), ('irrf', e.incidencia_irrf), ('fgts', e.incidencia_fgts)
   ) AS t(tributo, incide);
+
+-- 7.3.1 Estado de validação. As incidências derivadas dos indicadores das 0017/0023 entram
+--       como validadas (conferidas nos pareceres, não nos atos). Ficam a_validar, sem que esta
+--       migration decida a regra: IRRF da multa do art. 477; o terço do abono pecuniário; a
+--       previdência sobre o terço de férias gozadas (base da contribuição patronal); e as três
+--       incidências que o motor da 0023 decide por parâmetro a_validar (previdência do aviso
+--       indenizado, IRRF do abono e IRRF da dobra).
+UPDATE folha.rubric_incidence SET status_validacao = 'validado';
+DO $$
+DECLARE
+  v_linhas integer;
+BEGIN
+  UPDATE folha.rubric_incidence ri
+     SET status_validacao = 'a_validar'
+    FROM folha.earning_deduction_code e
+   WHERE e.code_id = ri.code_id AND e.account_id IS NULL
+     AND (   (e.codigo = 'MULTA_ART477' AND ri.tributo = 'irrf')
+          OR (e.codigo = 'ABONO_PECUNIARIO_TERCO')
+          OR (e.codigo = 'FERIAS_TERCO' AND ri.tributo = 'previdencia')
+          OR (e.codigo = 'AVISO_PREVIO_INDENIZADO' AND ri.tributo = 'previdencia')
+          OR (e.codigo IN ('ABONO_PECUNIARIO', 'FERIAS_DOBRA') AND ri.tributo = 'irrf'));
+  GET DIAGNOSTICS v_linhas = ROW_COUNT;
+  IF v_linhas <> 8 THEN
+    RAISE EXCEPTION '0026: esperava marcar 8 incidências como a_validar; marcou %', v_linhas;
+  END IF;
+
+  -- Rubricas legadas da 0017 que juntam férias e terço e não distinguem gozadas de
+  -- indenizadas: nenhum processo as emite. Ficam inativas (não são apagadas).
+  UPDATE folha.earning_deduction_code
+     SET ativa = false, updated_at = now()
+   WHERE account_id IS NULL AND codigo IN ('FERIAS_VENCIDAS', 'FERIAS_PROPORCIONAL');
+  GET DIAGNOSTICS v_linhas = ROW_COUNT;
+  IF v_linhas <> 2 THEN
+    RAISE EXCEPTION '0026: esperava desativar 2 rubricas legadas; desativou %', v_linhas;
+  END IF;
+END
+$$;
 
 -- 7.4 Rubrica x base: cada incidência que compõe base liga a rubrica à base do código; o
 --     salário de contribuição do mês também afere o salário-família, exceto o terço de férias.
@@ -868,6 +958,7 @@ BEGIN
   -- precisa do EXECUTE.
   FOREACH v_tabela IN ARRAY ARRAY[
     'folha.rubrica_derivar_tipo()', 'folha.exigir_rubrica_da_conta()', 'folha.conta_imutavel()',
+    'folha.payroll_entry_consumido()',
     'folha.formula_valida(jsonb, integer)'
   ]
   LOOP

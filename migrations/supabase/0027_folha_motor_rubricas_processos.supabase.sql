@@ -16,8 +16,9 @@
 --      o tipo de processo da folha (mensal, adiantamento, complementar, 13º 1ª e 2ª parcela,
 --      férias e rescisão — os três últimos pelas funções da 0023), gravando itens por rubrica,
 --      bases, memória de cálculo com a camada da regra e pendências como dado.
---   6. Trava de fechamento (bloqueio 2): folha com pendência sem liberação registrada não é
---      aprovada nem fechada; fechar exige data de pagamento; data de pagamento anterior ao
+--   6. Trava de fechamento (bloqueio 2): folha nasce em rascunho e só anda um estado por vez;
+--      folha com pendência aberta não é aprovada, fechada nem despachada (só a_validar e
+--      conferência são liberáveis; pendência de cálculo não); fechar exige data de pagamento; data de pagamento anterior ao
 --      início da competência é recusada (exceto férias, pagas antes do gozo).
 --
 -- NÃO altera as migrations 0014 a 0026. NÃO APLICAR EM PRODUÇÃO sem conferir o que está
@@ -639,7 +640,8 @@ $$;
 --     Critério do parecer de rescisão (saldo de salário): salário / divisor x dias; dias de
 --     contrato no mês limitados ao divisor; mês inteiro = divisor. O divisor é o parâmetro
 --     divisor_saldo_salario (a_validar). Dias de afastamento com pagamento suspenso são
---     abatidos (critério de dias não tratado nos pareceres: pendência a_validar).
+--     abatidos dos dias de contrato do mês, antes do limite (critério de dias não tratado
+--     nos pareceres: pendência a_validar).
 CREATE FUNCTION folha.dias_proporcionais(
   p_contract_id uuid,
   p_competencia date
@@ -704,11 +706,11 @@ BEGIN
 
   proporcional := true;
   divisor := folha.get_param('divisor_saldo_salario', v_ini);
-  v_base := CASE WHEN por_admissao_ou_desligamento
-                 THEN LEAST(dias_contrato, divisor::integer)
-                 ELSE divisor::integer END;
-  dias := CASE WHEN dias_afastamento >= dias_contrato THEN 0
-               ELSE GREATEST(v_base - dias_afastamento, 0) END;
+  -- Dias efetivamente remunerados no mês (dias de contrato menos os de afastamento sem
+  -- pagamento), limitados ao divisor. Uma só conta para admissão, desligamento e afastamento:
+  -- quem trabalhou 1 dia recebe 1/30, em mês de 28, 30 ou 31 dias.
+  v_base := dias_contrato - dias_afastamento;
+  dias := LEAST(GREATEST(v_base, 0), divisor::integer);
   pendencias := folha.params_a_validar(ARRAY['divisor_saldo_salario'], v_ini);
   IF dias_afastamento > 0 THEN
     pendencias := pendencias || ARRAY['a_validar:proporcionalidade_por_afastamento_criterio_de_dias'];
@@ -808,11 +810,16 @@ BEGIN
     END IF;
     -- Recibo de férias na competência: o motor ainda não abate os dias de gozo do salário nem
     -- reapura o INSS do mês sobre o total (parecer de 13º e férias, 2.7). Vira pendência.
+    -- Vale o PERÍODO de gozo (gravado no item FERIAS_GOZO), em folha de qualquer competência:
+    -- férias iniciadas no mês anterior também tiram dias deste mês.
     IF EXISTS (SELECT 1 FROM folha.payroll_result pr
                  JOIN folha.payroll_run r ON r.run_id = pr.run_id
+                 JOIN folha.payroll_result_item i ON i.result_id = pr.result_id AND i.rubrica_codigo = 'FERIAS_GOZO'
                 WHERE pr.account_id = p_conta AND pr.contract_id = p_contract_id
-                  AND r.competencia = p_competencia AND r.tipo_processo = 'ferias'
-                  AND r.status <> 'cancelled') THEN
+                  AND r.tipo_processo = 'ferias' AND r.status <> 'cancelled'
+                  AND (i.detalhe->>'inicio_gozo')::date
+                      <= (date_trunc('month', p_competencia::timestamp) + interval '1 month' - interval '1 day')::date
+                  AND (i.detalhe->>'inicio_gozo')::date + i.quantidade::integer - 1 >= p_competencia) THEN
       v_pend := v_pend || ARRAY['pendencia:ferias_na_competencia_salario_e_inss_do_mes_nao_reapurados'];
     END IF;
     SELECT * INTO v_dias FROM folha.dias_proporcionais(p_contract_id, p_competencia);
@@ -842,12 +849,17 @@ BEGIN
   --     da rubrica. Rubrica com lançamento não recebe também o lançamento automático.
   FOR v_l IN
     SELECT x.entry_id, x.code_id, x.quantidade, x.valor,
-           e.codigo, e.tipo_rubrica, e.forma_calculo, e.ordem_calculo
+           e.codigo, e.tipo_rubrica, e.forma_calculo, e.ordem_calculo, e.ativa
       FROM (
         SELECT pe.entry_id, pe.code_id, pe.quantidade, pe.valor, pe.created_at
           FROM folha.payroll_entry pe
          WHERE pe.account_id = p_conta AND pe.contract_id = p_contract_id
            AND pe.competencia = p_competencia AND pe.tipo_processo = p_tipo
+           -- lançamento já pago por folha não cancelada não é pago de novo
+           AND NOT EXISTS (SELECT 1 FROM folha.payroll_result_item ci
+                             JOIN folha.payroll_result cr ON cr.result_id = ci.result_id
+                             JOIN folha.payroll_run cx ON cx.run_id = cr.run_id
+                            WHERE ci.entry_id = pe.entry_id AND cx.status <> 'cancelled')
         UNION ALL
         SELECT NULL::uuid, a.code_id, NULL::numeric, NULL::numeric, NULL::timestamptz
           FROM (SELECT DISTINCT rr.code_id
@@ -866,6 +878,9 @@ BEGIN
       JOIN folha.earning_deduction_code e ON e.code_id = x.code_id
      ORDER BY e.ordem_calculo, e.codigo, x.created_at, x.entry_id
   LOOP
+    IF NOT v_l.ativa THEN
+      RAISE EXCEPTION 'Rubrica % está inativa e não entra em cálculo', v_l.codigo;
+    END IF;
     IF v_l.forma_calculo = 'apuracao_motor' THEN
       RAISE EXCEPTION 'Rubrica % é apurada pelo motor e não aceita lançamento nem regra', v_l.codigo;
     END IF;
@@ -932,7 +947,18 @@ BEGIN
   END LOOP;
 
   -- Adiantamento: só o que foi lançado ou regrado; tributos e encargos ficam na folha mensal.
+  -- Depois da mensal da competência não há mais de onde descontá-lo: recusa. A retenção de
+  -- IRRF sobre o adiantamento quando o saldo é pago em outro mês não foi conferida na fonte:
+  -- o motor não retém e a folha de adiantamento já nasce com a pendência a_validar.
   IF p_tipo = 'adiantamento' THEN
+    IF EXISTS (SELECT 1 FROM folha.payroll_result pr
+                 JOIN folha.payroll_run r ON r.run_id = pr.run_id
+                WHERE pr.account_id = p_conta AND pr.contract_id = p_contract_id
+                  AND r.competencia = p_competencia AND r.tipo_processo IN ('mensal', 'rescisao')
+                  AND r.status <> 'cancelled') THEN
+      RAISE EXCEPTION 'Contrato % já tem folha mensal ou rescisão calculada na competência %: o adiantamento não seria descontado', p_contract_id, p_competencia;
+    END IF;
+    v_pend := v_pend || ARRAY['a_validar:irrf_adiantamento_sem_retencao_regra_quando_o_saldo_e_pago_em_outro_mes'];
     IF jsonb_array_length(v_itens) = 0 THEN
       RAISE EXCEPTION 'Folha de adiantamento sem lançamento para o contrato %', p_contract_id;
     END IF;
@@ -996,6 +1022,10 @@ BEGIN
   v_base_fgts := (v_bases->>'FGTS_MENSAL')::numeric;
   IF v_base_inss < 0 OR v_base_irrf < 0 OR v_base_fgts < 0 THEN
     RAISE EXCEPTION 'Contrato %: base negativa (INSS %, IRRF %, FGTS %); os descontos superam os proventos', p_contract_id, v_base_inss, v_base_irrf, v_base_fgts;
+  END IF;
+
+  IF p_tipo = 'mensal' AND v_base_inss = 0 THEN
+    v_pend := v_pend || ARRAY['pendencia:folha_mensal_com_base_zero_conferir'];
   END IF;
 
   SELECT COALESCE(sum(x.base_previdencia), 0) INTO v_outros
@@ -1308,6 +1338,7 @@ BEGIN
     || jsonb_build_object('codigo', 'FERIAS_GOZO', 'valor', v_r.valor_ferias, 'quantidade', v_r.dias_gozo,
                           'base_calculo', v_r.base_calculo, 'camada', 'motor',
                           'detalhe', jsonb_build_object('origem', 'calc_ferias', 'dias_direito', v_r.dias_direito,
+                                                        'inicio_gozo', v_inicio,
                                                         'data_limite_pagamento', v_r.data_limite_pagamento))
     || jsonb_build_object('codigo', 'FERIAS_TERCO', 'valor', v_r.valor_um_terco, 'base_calculo', v_r.valor_ferias,
                           'camada', 'motor', 'detalhe', jsonb_build_object('origem', 'calc_ferias'));
@@ -1499,6 +1530,32 @@ $$;
 -- 6. Gravação do resultado: encargos por lotação, totais, itens, bases, memória de cálculo
 --    com a camada da regra e pendências como dado.
 -- ===========================================================================
+
+-- Tipo da pendência pelo código. Só a_validar e conferencia são liberáveis.
+--   a_validar:...  -> a_validar (regra, parâmetro ou incidência não conferidos na fonte)
+--   pendencia:...  -> pendencia (valor sabidamente errado ou incompleto; NÃO liberável), salvo
+--     os avisos de conferência abaixo, que não indicam valor errado e são 'conferencia'.
+-- Código novo cai em 'pendencia' (não liberável) até ser classificado aqui.
+CREATE FUNCTION folha.pendencia_tipo(p_codigo text) RETURNS text
+LANGUAGE sql IMMUTABLE
+SET search_path = pg_catalog
+AS $$
+  SELECT CASE
+    WHEN p_codigo LIKE 'a_validar:%' THEN 'a_validar'
+    WHEN p_codigo LIKE ANY (ARRAY[
+           'pendencia:inss_do_recibo_provisorio_reapurar_na_folha_do_mes_de_gozo',
+           'pendencia:dobra_art_137_aplicada_sobre_%',
+           'pendencia:gozo_fracionado_conferir_fracoes_minimas_e_saldo_de_%',
+           'pendencia:quitacao_fora_de_dezembro_conferir_ano_de_referencia',
+           'pendencia:quitacao_depois_do_dia_limite',
+           'pendencia:adiantamento_fora_da_janela_fev_nov',
+           'pendencia:periodo_aquisitivo_completado_ate_a_data_final_reclassificado_como_vencido',
+           'pendencia:desligamento_no_mes_conferir_se_o_saldo_sera_pago_na_rescisao',
+           'pendencia:folha_mensal_com_base_zero_conferir',
+           'pendencia:cprb_percentual_reducao_do_cadastro_nao_utilizado']) THEN 'conferencia'
+    ELSE 'pendencia'
+  END;
+$$;
 CREATE FUNCTION folha.folha_gravar_resultado(
   p_conta uuid,
   p_run_id uuid,
@@ -1565,6 +1622,14 @@ BEGIN
   IF v_liq < 0 THEN
     v_pend := v_pend || ARRAY['pendencia:liquido_negativo_exige_decisao'];
   END IF;
+  -- Incidência a_validar de rubrica usada neste resultado vira pendência.
+  v_pend := v_pend || ARRAY(
+    SELECT DISTINCT 'a_validar:incidencia_' || e.codigo || '_' || ri.tributo
+      FROM jsonb_array_elements(p_calc->'itens') i
+      JOIN folha.earning_deduction_code e ON e.code_id = folha.rubrica_por_codigo(p_conta, i->>'codigo')
+      JOIN folha.rubric_incidence ri ON ri.code_id = e.code_id
+     WHERE ri.status_validacao = 'a_validar'
+       AND ri.vigencia_inicio <= p_competencia AND (ri.vigencia_fim IS NULL OR ri.vigencia_fim >= p_competencia));
   v_pend := ARRAY(SELECT DISTINCT p FROM unnest(v_pend) AS p ORDER BY p);
 
   INSERT INTO folha.payroll_result (
@@ -1642,8 +1707,7 @@ BEGIN
   END LOOP;
 
   INSERT INTO folha.payroll_pendency (account_id, run_id, result_id, contract_id, codigo, tipo)
-  SELECT p_conta, p_run_id, v_result_id, p_contract_id, p,
-         CASE WHEN p LIKE 'a_validar:%' THEN 'a_validar' ELSE 'pendencia' END
+  SELECT p_conta, p_run_id, v_result_id, p_contract_id, p, folha.pendencia_tipo(p)
     FROM unnest(v_pend) AS p;
 
   RETURN v_result_id;
@@ -1759,7 +1823,12 @@ SET row_security = off
 AS $$
 DECLARE
   v_abertas integer;
+  v_t record;
 BEGIN
+  -- Folha nasce em rascunho: os demais estados só por transição.
+  IF TG_OP = 'INSERT' AND NEW.status <> 'draft' THEN
+    RAISE EXCEPTION 'Folha só pode ser criada em draft (recebido: %)', NEW.status;
+  END IF;
   IF TG_OP = 'UPDATE' THEN
     IF OLD.status IN ('closed', 'cancelled') THEN
       RAISE EXCEPTION 'Folha % está % e não pode ser alterada', OLD.run_id,
@@ -1774,14 +1843,31 @@ BEGIN
                 OR (OLD.status = 'approved'    AND NEW.status = 'closed')) THEN
       RAISE EXCEPTION 'Folha %: não passa de % para %', OLD.run_id, OLD.status, NEW.status;
     END IF;
-    -- Com o cálculo concluído, a identidade e os totais da folha não mudam mais.
+    -- Cálculo concluído = há resultado e os totais da folha são a soma dos resultados (vale
+    -- para a função payroll_run_concluir_calculo e para UPDATE direto).
+    IF NEW.status = 'calculated' AND OLD.status IS DISTINCT FROM 'calculated' THEN
+      SELECT count(*) AS n, sum(pr.total_proventos) AS prov, sum(pr.total_descontos) AS descontos,
+             sum(pr.liquido) AS liq, sum(pr.inss_patronal + pr.rat + pr.terceiros) AS enc
+        INTO v_t
+        FROM folha.payroll_result pr
+       WHERE pr.account_id = NEW.account_id AND pr.run_id = NEW.run_id;
+      IF v_t.n = 0 THEN
+        RAISE EXCEPTION 'Folha % não tem resultado calculado', NEW.run_id;
+      END IF;
+      IF ROW(NEW.total_proventos, NEW.total_descontos, NEW.total_liquido, NEW.total_encargos_patronais)
+         IS DISTINCT FROM ROW(v_t.prov, v_t.descontos, v_t.liq, v_t.enc) THEN
+        RAISE EXCEPTION 'Folha %: os totais não são a soma dos resultados; conclua o cálculo por payroll_run_concluir_calculo', NEW.run_id;
+      END IF;
+    END IF;
+    -- Com o cálculo concluído, a identidade, os totais e a data de pagamento não mudam mais
+    -- (o IRRF foi apurado pela data de pagamento: mudar a data exige cancelar e recalcular).
     IF OLD.status IN ('calculated', 'approved')
        AND ROW(NEW.account_id, NEW.competencia, NEW.tipo_processo, NEW.sequencia, NEW.employer_id, NEW.establishment_id,
-               NEW.total_proventos, NEW.total_descontos, NEW.total_liquido, NEW.total_encargos_patronais)
+               NEW.total_proventos, NEW.total_descontos, NEW.total_liquido, NEW.total_encargos_patronais, NEW.data_pagamento)
            IS DISTINCT FROM
            ROW(OLD.account_id, OLD.competencia, OLD.tipo_processo, OLD.sequencia, OLD.employer_id, OLD.establishment_id,
-               OLD.total_proventos, OLD.total_descontos, OLD.total_liquido, OLD.total_encargos_patronais) THEN
-      RAISE EXCEPTION 'Folha % está em %: competência, tipo de processo, empregador e totais não podem ser alterados', OLD.run_id, OLD.status;
+               OLD.total_proventos, OLD.total_descontos, OLD.total_liquido, OLD.total_encargos_patronais, OLD.data_pagamento) THEN
+      RAISE EXCEPTION 'Folha % está em %: competência, tipo de processo, empregador, totais e data de pagamento não podem ser alterados', OLD.run_id, OLD.status;
     END IF;
   END IF;
 
@@ -1797,8 +1883,8 @@ BEGIN
     RAISE EXCEPTION 'Folha %: data de pagamento % anterior ao início da competência %', NEW.run_id, NEW.data_pagamento, NEW.competencia;
   END IF;
 
-  IF NEW.status IN ('approved', 'closed')
-     AND (TG_OP = 'INSERT' OR OLD.status IS DISTINCT FROM NEW.status) THEN
+  IF TG_OP = 'UPDATE' AND NEW.status IN ('approved', 'closed')
+     AND OLD.status IS DISTINCT FROM NEW.status THEN
     SELECT count(*) INTO v_abertas
       FROM folha.payroll_pendency p
      WHERE p.account_id = NEW.account_id AND p.run_id = NEW.run_id AND p.liberada_em IS NULL;
@@ -1881,7 +1967,11 @@ END;
 $$;
 
 -- 8.3 Liberação explícita de pendência: por folha e código, com responsável e motivo. Fica na
---     própria pendência (quem, quando, motivo, sessão) e na auditoria.
+--     própria pendência (quem, quando, motivo, sessão) e na auditoria. Só a_validar e
+--     conferencia são liberáveis; pendência de cálculo não é.
+--     LIMITE CONHECIDO: o responsável é texto informado por quem chama; a sessão gravada é a
+--     do login do worker. A identidade de quem libera só será confiável quando a Folha
+--     receber o subject do contexto do dnex-gestao (bloqueio de produção, ver STATUS).
 CREATE FUNCTION folha.payroll_pendencias_liberar(
   p_run_id uuid,
   p_codigo text,
@@ -1909,6 +1999,11 @@ BEGIN
   END IF;
   IF v_status <> 'calculated' THEN
     RAISE EXCEPTION 'Folha % está em %: pendência só é liberada com o cálculo concluído', p_run_id, v_status;
+  END IF;
+  IF EXISTS (SELECT 1 FROM folha.payroll_pendency p
+              WHERE p.account_id = v_conta AND p.run_id = p_run_id AND p.codigo = p_codigo
+                AND p.liberada_em IS NULL AND p.tipo = 'pendencia') THEN
+    RAISE EXCEPTION 'Pendência de cálculo % não é liberável: o valor está errado ou incompleto; corrija a origem, cancele a folha e recalcule', p_codigo;
   END IF;
   UPDATE folha.payroll_pendency p
      SET liberada_em = now(), liberada_por = btrim(p_responsavel),
@@ -1987,6 +2082,72 @@ BEGIN
 END;
 $$;
 
+-- 8.5 dispatch_folha_completa (0020): só despacha folha FECHADA e sem pendência aberta.
+--     Corpo da 0020 com as duas conferências; CREATE OR REPLACE preserva a ACL da 0022.
+--     (Os geradores build_esocial_s1200 e build_contabil_folha seguem os da 0020, a refazer.)
+CREATE OR REPLACE FUNCTION folha.dispatch_folha_completa(
+  p_run_id uuid
+) RETURNS TABLE (
+  esocial_events_dispatched integer,
+  contabil_events_dispatched integer
+)
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog, folha
+AS $$
+DECLARE
+  v_result record;
+  v_esocial_count integer := 0;
+  v_contabil_count integer := 0;
+  v_competencia date;
+  v_status text;
+  v_abertas integer;
+BEGIN
+  SELECT competencia, status INTO v_competencia, v_status
+  FROM folha.payroll_run
+  WHERE run_id = p_run_id;
+
+  IF v_competencia IS NULL THEN
+    RAISE EXCEPTION 'payroll_run % não encontrado', p_run_id;
+  END IF;
+  IF v_status <> 'closed' THEN
+    RAISE EXCEPTION 'Folha % está em % e não pode ser despachada: só folha fechada gera eventos', p_run_id, v_status;
+  END IF;
+  SELECT count(*) INTO v_abertas
+    FROM folha.payroll_pendency p WHERE p.run_id = p_run_id AND p.liberada_em IS NULL;
+  IF v_abertas > 0 THEN
+    RAISE EXCEPTION 'Folha % tem % pendência(s) sem liberação e não pode ser despachada', p_run_id, v_abertas;
+  END IF;
+
+  FOR v_result IN
+    SELECT result_id FROM folha.payroll_result WHERE run_id = p_run_id
+  LOOP
+    -- Dispatch eSocial S-1200
+    PERFORM folha.dispatch_esocial_event(
+      p_run_id,
+      v_result.result_id,
+      'S-1200',
+      v_competencia,
+      folha.build_esocial_s1200(v_result.result_id),
+      NULL
+    );
+    v_esocial_count := v_esocial_count + 1;
+
+    -- Dispatch contábil
+    PERFORM folha.dispatch_accounting_event(
+      p_run_id,
+      v_result.result_id,
+      'folha_mensal',
+      folha.build_contabil_folha(v_result.result_id)
+    );
+    v_contabil_count := v_contabil_count + 1;
+  END LOOP;
+
+  esocial_events_dispatched := v_esocial_count;
+  contabil_events_dispatched := v_contabil_count;
+  RETURN NEXT;
+END;
+$$;
+
 -- ===========================================================================
 -- 9. ACL das funções: tira o EXECUTE de todo papel que não seja o dono e concede só o
 --    necessário. As auxiliares internas não são concedidas a ninguém.
@@ -2022,7 +2183,8 @@ BEGIN
     ['folha.folha_gravar_resultado(uuid, uuid, uuid, date, jsonb)',                 ''],
     ['folha.payroll_run_trava()',                                                   ''],
     ['folha.payroll_result_so_em_folha_aberta()',                                   ''],
-    ['folha.processo_pendencias_gerais(uuid, uuid, date)',                          '']
+    ['folha.processo_pendencias_gerais(uuid, uuid, date)',                          ''],
+    ['folha.pendencia_tipo(text)',                                                  'dnex_gestao_folha_worker, dnex_gestao_data_owner']
   ]
   LOOP
     FOR v_papel IN

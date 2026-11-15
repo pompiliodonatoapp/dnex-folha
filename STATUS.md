@@ -6,6 +6,24 @@ Branch `feat/folha-rubricas-processos-20261115`, PR em rascunho. Nada aplicado e
 **Não aplicar em produção** sem a dependência do dnex-gestao da 0024 e sem decidir o que está `a_validar`.
 Decisão registrada em `docs/02-decisoes/ADR-rubricas-bases-camadas.md` (proposta; aceite do proprietário pendente).
 
+### Segunda rodada de revisão (15/11, mesma PR) — fechado nas próprias 0026/0027
+
+- **Trava:** folha só nasce em `draft`; `draft -> calculated` exige resultado e totais iguais à soma dos resultados (também por UPDATE direto); data de pagamento congelada depois do cálculo; liberação por tipo (`a_validar` e `conferencia` liberáveis com motivo; `pendencia` de cálculo NÃO é liberável: corrige, cancela e recalcula); `dispatch_folha_completa` só despacha folha fechada e sem pendência aberta.
+- **Cálculo:** lançamento já pago por folha não cancelada não é pago de novo nem alterado; férias contam pelo período de gozo em qualquer competência; adiantamento já nasce com pendência `a_validar` e é recusado depois da mensal; tabela do IRRF de 2026 fechada em 31/12/2026; `rubric_incidence.status_validacao` (8 incidências globais `a_validar`, que viram pendência quando usadas); `FERIAS_VENCIDAS`/`FERIAS_PROPORCIONAL` inativas; afastamento = dias de contrato menos dias afastados, limitado a 30; mensal com base zero gera pendência.
+- **Menores:** limite de tamanho da fórmula; base de conta não repete código de base global; mensagens que não revelam uuid alheio; pré-checks da 0026 listam os códigos em conflito.
+- **Decisão a confirmar:** criei o tipo `conferencia` (liberável) para avisos das funções da 0023 que não indicam valor errado (ex.: INSS provisório do recibo de férias, devolvido sempre por `calc_ferias`, e base zero). Sem ele nenhuma folha de férias fecharia. Lista em `folha.pendencia_tipo`; código não classificado cai em `pendencia`.
+- **Fixtures em testes anteriores (esperados inalterados):** 0023 ganha também tabela fictícia de IRRF de 2027; 0025 cria a folha "fechada" do cenário como superusuário com gatilhos desligados (folha não nasce mais fechada).
+
+### Bloqueios de produção restantes
+
+1. Autenticação pelo dnex-gestao (grupo e permissão da Folha) — dependência da 0024.
+2. **Identidade de quem libera, aprova e fecha é texto livre** informado por quem chama; só a sessão do worker é gravada. Bloqueio até a Folha receber o subject do contexto do gestao (próxima migration).
+3. Valores que o motor sabe que estão errados e marca como pendência não liberável (a folha não fecha): salário e INSS do mês de gozo, adiantamento não descontado na rescisão, pensão fora da base do IRRF, outros vínculos em 13º/férias/rescisão, contribuinte individual com outras fontes, 13º sem 1ª parcela localizada, folha sem data de pagamento.
+4. Tudo que está `a_validar` (parâmetros, incidências, códigos do eSocial).
+5. Produção tem 80 linhas em `folha.earning_deduction_code` contra 40 semeadas aqui: a 0026 aborta listando os códigos em conflito; a limpeza é decisão do dono, fora desta PR.
+6. `dispatch_folha_completa` e os geradores da 0020 não filtram a conta e estão fora do leiaute (a refazer na fatia do eSocial).
+7. Reversões (`.down.sql`) fora do CI; corrida real entre processos do mesmo contrato sem teste de concorrência.
+
 ### O que entrou
 
 - **0026 (estrutura):** base de cálculo como entidade e ligação N:N com a rubrica; incidência por tributo como código, com vigência; rubrica com tipo, forma de cálculo e ordem; três camadas de regra (empresa, convenção, contrato) com precedência em tabela; convenção ligada ao contrato; lançamentos do período, afastamentos e remuneração de outros vínculos; folha com tipo de processo e sequência (várias por competência); itens, bases e pendências do resultado como dado; camada da regra na memória de cálculo; 40 rubricas da 0017 migradas e 12 rubricas dos processos; tabelas de INSS e salário mínimo de 2026 fechadas em 31/12/2026; RLS com FORCE e ACL em 15 tabelas.
@@ -14,11 +32,11 @@ Decisão registrada em `docs/02-decisoes/ADR-rubricas-bases-camadas.md` (propost
 
 ### Verificado em execução (PostgreSQL 17 + pgTAP em Docker local, banco recriado, roteiro de `tests/ci/replay.sh`)
 
-- 1.178 asserções aprovadas: 0014: 19; 0022: 25; 0023: 371; 0024: 165; 0025: 207; **0026: 307**; dashboard: 12; eventos_vida: 47; golden: 25; mais a corrida do rateio.
+- 1.222 asserções aprovadas: 0014: 19; 0022: 25; 0023: 371; 0024: 165; 0025: 207; **0026: 351**; dashboard: 12; eventos_vida: 47; golden: 25; mais a corrida do rateio.
 - `0026_rubricas_processos`: CD-01, CD-03 e CD-06, CT-01, CT-02, CT-08 e G01 dos pareceres pelo fluxo da folha; casos derivados com a memória no comentário (mensal completa com hora extra por fórmula, falta e desconto fixo; precedência das camadas; quantidade x valor; percentual sobre base; proporcionalidade; adiantamento, mensal e complementar; múltiplos vínculos; dezembro pago em janeiro); trava; vigência sem tabela; exceções; RLS, chaves compostas e ACL.
 - `up -> down -> up` das duas migrations com a suíte inteira verde depois. O CI não executa os `.down.sql`.
 - Testes falham quando a precedência é invertida, a trava é desligada, a vigência é reaberta ou a incidência de uma rubrica muda (conferido à mão, fora do CI).
-- Revisão independente somente leitura (DP e SQL/segurança): sem divergência aritmética; 1 achado bloqueante e 13 importantes corrigidos e cobertos por teste. **A versão corrigida não passou por segunda rodada dos revisores.**
+- Revisão independente somente leitura (DP e SQL/segurança): sem divergência aritmética; 1 achado bloqueante e 13 importantes corrigidos e cobertos por teste. Segunda rodada dos revisores feita sobre essa versão (sem divergência aritmética); os achados dela estão na seção acima. **A versão que os corrige não foi revista de novo.**
 
 ### Arquivos de teste anteriores tocados (detalhe em `scratch/DIVERGENCIAS-FATIA4.md`, fora do git)
 
@@ -33,8 +51,7 @@ Decisão registrada em `docs/02-decisoes/ADR-rubricas-bases-camadas.md` (propost
 
 - Não implementado: reapuração do salário e do INSS no mês de gozo; desconto do adiantamento na rescisão; dedução de pensão e previdência complementar; médias apuradas pelo motor (bases de médias, 13º e férias existem sem rubrica ligada); reflexo em DSR; 13º parcela de ajuste e férias em dois meses pelo fluxo; mais de um contrato do mesmo trabalhador na conta; versão das regras usadas em folha fechada; FKs compostas em `rule_id`/`entry_id` dos itens e em `payroll_result`.
 - Incidências de aviso indenizado, abono e dobra ficam fixas no catálogo enquanto o motor decide por parâmetro `a_validar` (duas fontes).
-- Tabela do IRRF e parâmetros da redução de 2026 seguem com vigência aberta (fora do pedido desta fatia).
-- Folha inserida já como `approved`/`closed` continua aceita (a suíte da 0025 depende disso).
+- Parâmetros da redução do IRRF (`payroll_parameter`) seguem com vigência aberta; a tabela do IRRF de 2026 fecha em 31/12/2026.
 - Documentação funcional (vault `DNEX-Documentacao`): não atualizada (vault inacessível neste host). Pendência documental aberta.
 
 ### Não verificado

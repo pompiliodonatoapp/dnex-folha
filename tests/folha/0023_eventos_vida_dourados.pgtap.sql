@@ -20,13 +20,13 @@ INSERT INTO gestao_auth.access_assertion
    account_id, legal_entity_id, branch_id, permissions, issued_at, expires_at)
 VALUES ('aa000000-0000-0000-0000-000000000099', gen_random_uuid(), 'system', 'folha_worker', 'dnex_folha_ci_login',
         'e0000000-0000-0000-0000-000000000099', 'e1000000-0000-0000-0000-000000000099', 'e2000000-0000-0000-0000-000000000099', ARRAY['folha.ci'], now(), now() + interval '4 minutes');
--- Fixture da fatia 4 (migration 0026): a tabela de INSS de 2026 passou a fechar em 31/12/2026.
+-- Fixture da fatia 4 (migration 0026): as tabelas de INSS e de IRRF de 2026 passaram a fechar em 31/12/2026.
 -- O caso CT-07 do parecer paga o ajuste do 13º em 08/01/2027 e foi conferido com as faixas de
--- 2026 (não há portaria de 2027 nos insumos). Entra uma tabela FICTÍCIA de 2027, cópia da de
--- 2026, só dentro desta transação de teste. Nenhum valor esperado mudou.
+-- 2026 (não há portaria de 2027 nos insumos). Entram tabelas FICTÍCIAS de 2027 (INSS e IRRF),
+-- cópias das de 2026, só dentro desta transação de teste. Nenhum valor esperado mudou.
 INSERT INTO folha.tax_table_version (tipo, vigencia_inicio, vigencia_fim, tabela_json, source_url, source_hash, captured_at)
 SELECT t.tipo, '2027-01-01', '2027-12-31', t.tabela_json, t.source_url, 'rotulo:ficticia-de-teste-copia-de-2026', t.captured_at
-  FROM folha.tax_table_version t WHERE t.tipo = 'inss' AND t.vigencia_inicio = '2026-01-01';
+  FROM folha.tax_table_version t WHERE t.tipo IN ('inss', 'irrf') AND t.vigencia_inicio = '2026-01-01';
 SET LOCAL SESSION AUTHORIZATION dnex_folha_ci_login;
 DO $$ BEGIN PERFORM gestao_auth.begin_request('aa000000-0000-0000-0000-000000000099', gen_random_uuid(), gen_random_uuid()); END $$;
 

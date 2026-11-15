@@ -29,7 +29,7 @@ UPDATE folha.earning_deduction_code
 SET LOCAL SESSION AUTHORIZATION dnex_folha_ci_login;
 DO $$ BEGIN PERFORM gestao_auth.begin_request('aa000000-0000-0000-0000-000000000027', gen_random_uuid(), gen_random_uuid()); END $$;
 
-SELECT plan(307);
+SELECT plan(351);
 
 -- ---------------------------------------------------------------------------
 -- Apoio
@@ -465,7 +465,8 @@ SELECT throws_ok(
 --    salário / divisor x dias, dias de contrato no mês limitados ao divisor, mês inteiro = divisor;
 --    divisor = parâmetro divisor_saldo_salario = 30, a_validar)
 --      p1: admissão em 16/10/2026, salário 3.000,00 -> 16 dias -> 1.600,00; INSS 7,5% = 120,00; FGTS 128,00
---      p2: mês inteiro com 10 dias de afastamento que suspende o pagamento -> 30 - 10 = 20 dias -> 2.000,00
+--      p2: outubro inteiro (31 dias) com 10 dias de afastamento que suspende o pagamento -> 31 - 10 = 21 dias
+--          (limite 30) -> 3.000,00 / 30 x 21 = 2.100,00
 --      p3: desligamento em 10/10/2026 -> 10 dias -> 1.000,00
 --      p5: afastamento que NÃO suspende o pagamento -> salário inteiro
 --      p6: admissão em 01/10 (mês de 31 dias) -> salário inteiro, não 31/30
@@ -493,8 +494,8 @@ SELECT pg_temp.confere('proporcional derivado p1 (admissão em 16/10)', pg_temp.
   '{"total_proventos": 160000, "inss_empregado": 12000, "irrf": 0, "fgts": 12800, "liquido": 148000}');
 SELECT is((pg_temp.item('p1', 'SALARIO_BASE')->>'quantidade')::numeric, 16::numeric, 'p1: 16 dias pagos');
 SELECT ok(pg_temp.pend('p1') @> ARRAY['a_validar:divisor_saldo_salario'], 'p1: o divisor a_validar vira pendência');
-SELECT is(round((pg_temp.res('p2')->>'total_proventos')::numeric * 100)::bigint, 200000::bigint,
-  'proporcional derivado p2: 10 dias de afastamento sem pagamento -> 20/30 do salário');
+SELECT is(round((pg_temp.res('p2')->>'total_proventos')::numeric * 100)::bigint, 210000::bigint,
+  'proporcional derivado p2: 10 dias de afastamento sem pagamento em mês de 31 dias -> 21/30 do salário');
 SELECT ok(pg_temp.pend('p2') @> ARRAY['a_validar:proporcionalidade_por_afastamento_criterio_de_dias'],
   'p2: o critério de dias do afastamento vira pendência');
 SELECT is(round((pg_temp.res('p3')->>'total_proventos')::numeric * 100)::bigint, 100000::bigint,
@@ -520,7 +521,7 @@ SELECT ok(pg_temp.pend('pf') @> ARRAY['a_validar:salario_familia_divisor_da_frac
 SELECT is(
   (SELECT d.proporcional::text || '/' || d.dias || '/' || d.dias_contrato || '/' || d.dias_afastamento
      FROM folha.dias_proporcionais(pg_temp.cid('p2'), '2026-10-01') d),
-  'true/20/31/10', 'dias_proporcionais: 31 dias de contrato, 10 de afastamento, 20 pagos');
+  'true/21/31/10', 'dias_proporcionais: 31 dias de contrato, 10 de afastamento, 21 pagos');
 
 -- ===========================================================================
 -- 5. Tipos de processo e várias folhas por competência
@@ -743,27 +744,34 @@ SELECT is(
 SELECT throws_like($$UPDATE folha.payroll_run SET data_pagamento = '2026-11-05' WHERE run_id = pg_temp.run('m10b')$$,
   'Folha % está fechada e não pode ser alterada', 'NEG: folha fechada não é alterada');
 
--- Sem data de pagamento: calcula com pendência, e não fecha.
+-- Sem data de pagamento: calcula com pendência de CÁLCULO, que não é liberável; a folha não aprova.
 INSERT INTO c VALUES ('t2', pg_temp.mk(1200.00, 'estagio'));
 INSERT INTO r VALUES ('t2', folha.run_payroll_employee(pg_temp.run('m10c'), pg_temp.cid('t2')));
 SELECT is(pg_temp.pend('t2'),
   ARRAY['a_validar:estagio_nao_incidencia_lei_11788', 'a_validar:irrf_simplificado_pela_fonte_pagadora_ato_rfb',
         'pendencia:data_pagamento_nao_informada_usado_ultimo_dia_da_competencia'],
   'sem data de pagamento: a pendência de cálculo é gravada');
-SELECT lives_ok($$SELECT folha.payroll_run_concluir_calculo(pg_temp.run('m10c'))$$, 'cálculo concluído (folha sem data de pagamento)');
 SELECT is(
-  (SELECT sum(folha.payroll_pendencias_liberar(pg_temp.run('m10c'), x, 'Responsável Fictício', 'teste'))
-     FROM unnest(pg_temp.pend('t2')) AS x),
-  3::bigint, 'as três pendências liberadas, inclusive a da data de pagamento');
-SELECT lives_ok($$SELECT folha.payroll_run_aprovar(pg_temp.run('m10c'), 'Responsável Fictício')$$, 'aprovada (pendências liberadas)');
-SELECT throws_like($$SELECT folha.payroll_run_fechar(pg_temp.run('m10c'), 'Responsável Fictício')$$,
-  'Folha % não pode ser fechada sem data de pagamento', 'NEG: mesmo com a pendência liberada, não fecha sem data de pagamento');
-SELECT throws_like($$UPDATE folha.payroll_run SET data_pagamento = '2026-09-30' WHERE run_id = pg_temp.run('m10c')$$,
+  (SELECT string_agg(p.tipo, ',' ORDER BY p.codigo) FROM folha.payroll_pendency p JOIN r ON r.result_id = p.result_id WHERE r.caso = 't2'),
+  'a_validar,a_validar,pendencia', 'tipo da pendência: duas a_validar (liberáveis) e uma de cálculo (não liberável)');
+SELECT lives_ok($$SELECT folha.payroll_run_concluir_calculo(pg_temp.run('m10c'))$$, 'cálculo concluído (folha sem data de pagamento)');
+SELECT is(folha.payroll_pendencias_liberar(pg_temp.run('m10c'), 'a_validar:estagio_nao_incidencia_lei_11788', 'Responsável Fictício', 'teste'), 1, 'a_validar liberada (1)');
+SELECT is(folha.payroll_pendencias_liberar(pg_temp.run('m10c'), 'a_validar:irrf_simplificado_pela_fonte_pagadora_ato_rfb', 'Responsável Fictício', 'teste'), 1, 'a_validar liberada (2)');
+SELECT throws_like(
+  $$SELECT folha.payroll_pendencias_liberar(pg_temp.run('m10c'), 'pendencia:data_pagamento_nao_informada_usado_ultimo_dia_da_competencia', 'Responsável Fictício', 'teste')$$,
+  'Pendência de cálculo % não é liberável%', 'NEG: pendência de cálculo não é liberável');
+SELECT throws_like($$SELECT folha.payroll_run_aprovar(pg_temp.run('m10c'), 'Responsável Fictício')$$,
+  'Folha % tem 1 pendência(s) sem liberação registrada e não pode passar a approved',
+  'NEG: com pendência de cálculo aberta a folha não é aprovada (sem data de pagamento não há como fechar)');
+SELECT throws_like($$UPDATE folha.payroll_run SET data_pagamento = '2026-10-31' WHERE run_id = pg_temp.run('m10c')$$,
+  'Folha % está em calculated: competência, tipo de processo, empregador, totais e data de pagamento não podem ser alterados',
+  'NEG: a data de pagamento não muda depois do cálculo (exige cancelar e recalcular)');
+SELECT pg_temp.folha('m10e', 'mensal', '2026-10-01', NULL, 6);
+SELECT throws_like($$UPDATE folha.payroll_run SET data_pagamento = '2026-09-30' WHERE run_id = pg_temp.run('m10e')$$,
   'Folha %: data de pagamento 2026-09-30 anterior ao início da competência 2026-10-01',
   'NEG: data de pagamento anterior ao início da competência é recusada');
-SELECT lives_ok($$UPDATE folha.payroll_run SET data_pagamento = '2026-10-01' WHERE run_id = pg_temp.run('m10c')$$,
-  'data de pagamento no primeiro dia da competência é aceita');
-SELECT lives_ok($$SELECT folha.payroll_run_fechar(pg_temp.run('m10c'), 'Responsável Fictício')$$, 'com a data de pagamento, fecha');
+SELECT lives_ok($$UPDATE folha.payroll_run SET data_pagamento = '2026-10-01' WHERE run_id = pg_temp.run('m10e')$$,
+  'data de pagamento no primeiro dia da competência é aceita (folha em rascunho)');
 SELECT throws_like(
   $$INSERT INTO folha.payroll_run (account_id, competencia, data_pagamento, sequencia) VALUES ('e0000000-0000-0000-0000-000000000027', '2026-12-01', '2026-11-30', 5)$$,
   'Folha %: data de pagamento 2026-11-30 anterior ao início da competência 2026-12-01',
@@ -771,13 +779,26 @@ SELECT throws_like(
 SELECT is((SELECT x.data_pagamento FROM folha.payroll_run x WHERE x.run_id = pg_temp.run('fe09')), '2026-08-28'::date,
   'férias: a folha é paga antes do gozo (única exceção à regra)');
 SELECT throws_ok(
-  $$INSERT INTO folha.payroll_run (account_id, competencia, data_pagamento, status, sequencia) VALUES ('e0000000-0000-0000-0000-000000000027', '2026-07-01', NULL, 'closed', 5)$$,
-  'P0001', NULL, 'NEG: folha não nasce fechada sem data de pagamento');
+  format($$INSERT INTO folha.payroll_run (account_id, competencia, data_pagamento, status, sequencia)
+           VALUES ('e0000000-0000-0000-0000-000000000027', '2026-07-01', '2026-07-31', %L, 5)$$, x.st),
+  'P0001', 'Folha só pode ser criada em draft (recebido: ' || x.st || ')', 'NEG: folha não nasce em ' || x.st)
+  FROM unnest(ARRAY['calculating', 'calculated', 'approved', 'closed', 'cancelled']) AS x(st);
 
 -- Dezembro pago em janeiro (derivado sobre o CD-03): competência 12/2026 paga em 05/01/2027.
---   INSS pela tabela da competência (2026): 557,51. IRRF pela data do pagamento (05/01/2027): tabela e
---   redução vigentes nessa data (as de 2026, de vigência aberta) -> 149,65. Fecha: 05/01/2027 >= 01/12/2026.
+--   INSS pela tabela da competência (2026): 557,51. IRRF pela data do pagamento (05/01/2027).
+--   A tabela do IRRF de 2026 agora fecha em 31/12/2026: sem tabela de 2027 o cálculo levanta erro.
+--   Com uma tabela FICTÍCIA de 2027 (cópia da de 2026, só nesta transação) o IRRF é 149,65.
 INSERT INTO c VALUES ('dez', pg_temp.mk(5400.00, 'clt', 'lucro_real', '2023-01-01', NULL, 0.02, 1.5000, 0.058));
+SELECT throws_ok($$SELECT folha.run_payroll_employee(pg_temp.run('m12'), pg_temp.cid('dez'))$$,
+  'P0001', 'Tabela IRRF não encontrada para competência 2027-01-05',
+  'NEG: pagamento datado em 2027 sem tabela de IRRF do ano levanta erro (não usa a de 2026)');
+SELECT is((SELECT count(*) FROM folha.payroll_result pr WHERE pr.run_id = pg_temp.run('m12')), 0::bigint,
+  'NEG: nada gravado para o pagamento sem tabela');
+RESET SESSION AUTHORIZATION;
+INSERT INTO folha.tax_table_version (tipo, vigencia_inicio, vigencia_fim, tabela_json, source_url, source_hash, captured_at)
+SELECT t.tipo, '2027-01-01', '2027-12-31', t.tabela_json, t.source_url, 'rotulo:ficticia-de-teste-copia-de-2026', t.captured_at
+  FROM folha.tax_table_version t WHERE t.tipo = 'irrf' AND t.vigencia_inicio = '2026-01-01';
+SET LOCAL SESSION AUTHORIZATION dnex_folha_ci_login;
 INSERT INTO r VALUES ('dez', folha.run_payroll_employee(pg_temp.run('m12'), pg_temp.cid('dez')));
 SELECT pg_temp.confere('dezembro pago em janeiro (derivado sobre o CD-03)', pg_temp.res('dez'),
   '{"inss_empregado": 55751, "irrf": 14965, "fgts": 43200, "liquido": 469284}');
@@ -928,7 +949,7 @@ SELECT throws_ok(
 SELECT throws_ok(
   $$INSERT INTO folha.payroll_entry (account_id, contract_id, code_id, competencia, valor)
     VALUES ('e0000000-0000-0000-0000-000000000027', pg_temp.cid('k1'), (SELECT code_id FROM alheio), '2026-10-01', 1)$$,
-  '23514', NULL, 'rubrica de outra conta não entra em lançamento desta conta');
+  '23514', 'payroll_entry: rubrica inexistente ou indisponível para esta conta', 'rubrica de outra conta não entra em lançamento desta conta');
 SELECT throws_ok(
   $$INSERT INTO folha.rubric_base (account_id, code_id, base_id, vigencia_inicio)
     VALUES ('e0000000-0000-0000-0000-000000000027', pg_temp.rub('COMISSAO'),
@@ -975,9 +996,11 @@ INSERT INTO acl VALUES
   ('folha.rubrica_derivar_tipo()',                                              ARRAY[]::text[]),
   ('folha.conta_imutavel()',                                                    ARRAY[]::text[]),
   ('folha.payroll_result_so_em_folha_aberta()',                                 ARRAY[]::text[]),
-  ('folha.processo_pendencias_gerais(uuid,uuid,date)',                          ARRAY[]::text[]);
-SELECT is_empty($$SELECT sig FROM acl WHERE to_regprocedure(sig) IS NULL$$, 'ACL: as 30 funções existem com a assinatura esperada');
-SELECT is((SELECT count(*) FROM acl), 30::bigint, 'ACL: 30 funções conferidas (âncora)');
+  ('folha.processo_pendencias_gerais(uuid,uuid,date)',                          ARRAY[]::text[]),
+  ('folha.payroll_entry_consumido()',                                           ARRAY[]::text[]),
+  ('folha.pendencia_tipo(text)',                                                ARRAY['dnex_gestao_folha_worker', 'dnex_gestao_data_owner']);
+SELECT is_empty($$SELECT sig FROM acl WHERE to_regprocedure(sig) IS NULL$$, 'ACL: as 32 funções existem com a assinatura esperada');
+SELECT is((SELECT count(*) FROM acl), 32::bigint, 'ACL: 32 funções conferidas (âncora)');
 SELECT is_empty(
   $$SELECT acl.sig || ' <- ' || papel FROM acl, unnest(acl.papeis) AS papel
      WHERE NOT has_function_privilege(papel, to_regprocedure(acl.sig)::oid, 'execute')$$,
@@ -1061,7 +1084,8 @@ SELECT throws_like($$UPDATE folha.payroll_run SET status = 'closed' WHERE run_id
 -- Pensão lançada (derivado): 200,00 de desconto; o IRRF ainda não a deduz e isso vira pendência.
 INSERT INTO c VALUES ('pa', pg_temp.mk(3000.00));
 INSERT INTO folha.payroll_entry (account_id, contract_id, code_id, competencia, valor)
-VALUES ('e0000000-0000-0000-0000-000000000027', pg_temp.cid('pa'), pg_temp.rub('PENSAO_ALIMENTICIA'), '2026-10-01', 200.00);
+VALUES ('e0000000-0000-0000-0000-000000000027', pg_temp.cid('pa'), pg_temp.rub('PENSAO_ALIMENTICIA'), '2026-10-01', 200.00),
+       ('e0000000-0000-0000-0000-000000000027', pg_temp.cid('pa'), pg_temp.rub('MULTA_ART477'), '2026-10-01', 100.00);
 INSERT INTO r VALUES ('pa', folha.run_payroll_employee(pg_temp.run('m10d'), pg_temp.cid('pa')));
 SELECT ok(pg_temp.pend('pa') @> ARRAY['pendencia:pensao_alimenticia_nao_deduzida_da_base_do_irrf'],
   'pensão alimentícia lançada: a falta da dedução no IRRF vira pendência de cálculo');
@@ -1069,10 +1093,10 @@ SELECT lives_ok($$SELECT folha.payroll_run_concluir_calculo(pg_temp.run('m10d'))
 SELECT throws_like($$UPDATE folha.payroll_run SET status = 'draft' WHERE run_id = pg_temp.run('m10d')$$,
   'Folha %: não passa de calculated para draft', 'NEG: folha calculada não volta a rascunho');
 SELECT throws_like($$UPDATE folha.payroll_run SET total_liquido = 1 WHERE run_id = pg_temp.run('m10d')$$,
-  'Folha % está em calculated: competência, tipo de processo, empregador e totais não podem ser alterados',
+  'Folha % está em calculated: competência, tipo de processo, empregador, totais e data de pagamento não podem ser alterados',
   'NEG: totais da folha calculada não são alterados');
 SELECT throws_like($$UPDATE folha.payroll_run SET tipo_processo = 'adiantamento' WHERE run_id = pg_temp.run('m10d')$$,
-  'Folha % está em calculated: competência, tipo de processo, empregador e totais não podem ser alterados',
+  'Folha % está em calculated: competência, tipo de processo, empregador, totais e data de pagamento não podem ser alterados',
   'NEG: tipo de processo da folha calculada não é alterado');
 SELECT lives_ok($$UPDATE folha.payroll_run SET status = 'cancelled' WHERE run_id = pg_temp.run('m10d')$$, 'folha calculada pode ser cancelada');
 SELECT throws_like($$UPDATE folha.payroll_run SET status = 'draft' WHERE run_id = pg_temp.run('m10d')$$,
@@ -1114,6 +1138,175 @@ SELECT ok(NOT pg_temp.pend('g01') && ARRAY['pendencia:adiantamento_salarial_pago
   'G01: sem adiantamento e paga no mês do desligamento, sem essas pendências');
 SELECT throws_ok($$SELECT folha.run_payroll_employee(pg_temp.run('co10'), pg_temp.cid('k1'), 0, 1)$$,
   'P0001', 'Salário-família só é calculado na folha mensal', 'NEG: filhos informados fora da folha mensal');
+
+-- ===========================================================================
+-- 12. Segunda rodada de revisão
+-- ===========================================================================
+-- (2) draft -> calculated por UPDATE direto: só com resultado e com os totais iguais à soma.
+SELECT throws_like($$UPDATE folha.payroll_run SET status = 'calculated' WHERE run_id = pg_temp.run('m10e')$$,
+  'Folha % não tem resultado calculado', 'NEG: folha sem resultado não passa a calculada por UPDATE direto');
+SELECT throws_like($$UPDATE folha.payroll_run SET status = 'calculated', total_liquido = 1 WHERE run_id = pg_temp.run('m10')$$,
+  'Folha %: os totais não são a soma dos resultados%', 'NEG: UPDATE direto para calculada com totais livres é barrado');
+
+-- (5) Despacho só de folha fechada.
+SELECT throws_like($$SELECT * FROM folha.dispatch_folha_completa(pg_temp.run('m10'))$$,
+  'Folha % está em draft e não pode ser despachada: só folha fechada gera eventos', 'NEG: folha em rascunho não é despachada');
+SELECT throws_like($$SELECT * FROM folha.dispatch_folha_completa(pg_temp.run('m10c'))$$,
+  'Folha % está em calculated e não pode ser despachada: só folha fechada gera eventos', 'NEG: folha calculada com pendência não é despachada');
+SELECT is(
+  (SELECT d.esocial_events_dispatched::text || '/' || d.contabil_events_dispatched FROM folha.dispatch_folha_completa(pg_temp.run('m10b')) d),
+  '1/1', 'folha fechada e sem pendência aberta é despachada (um resultado)');
+SELECT ok(
+  has_function_privilege('dnex_gestao_folha_worker', 'folha.dispatch_folha_completa(uuid)', 'execute')
+  AND NOT has_function_privilege('anon', 'folha.dispatch_folha_completa(uuid)', 'execute')
+  AND NOT has_function_privilege('authenticated', 'folha.dispatch_folha_completa(uuid)', 'execute'),
+  'dispatch_folha_completa mantém a ACL da 0022');
+
+-- (4) Pendência de cálculo não liberável (pensão fora do IRRF, na folha m10d já calculada e cancelada acima:
+--     a consulta abaixo confere o tipo; a recusa da liberação foi conferida na folha m10c).
+SELECT is(
+  (SELECT string_agg(p.codigo || '=' || p.tipo, ' ' ORDER BY p.codigo) FROM folha.payroll_pendency p JOIN r ON r.result_id = p.result_id
+    WHERE r.caso = 'pa' AND p.codigo LIKE 'pendencia:%'),
+  'pendencia:pensao_alimenticia_nao_deduzida_da_base_do_irrf=pendencia', 'pensão fora do IRRF: pendência de cálculo, não liberável');
+SELECT is(
+  ARRAY[folha.pendencia_tipo('a_validar:qualquer'), folha.pendencia_tipo('pendencia:inss_do_recibo_provisorio_reapurar_na_folha_do_mes_de_gozo'),
+        folha.pendencia_tipo('pendencia:ferias_na_competencia_salario_e_inss_do_mes_nao_reapurados'),
+        folha.pendencia_tipo('pendencia:adiantamento_salarial_pago_na_competencia_nao_descontado_na_rescisao'),
+        folha.pendencia_tipo('pendencia:codigo_novo_nao_classificado')],
+  ARRAY['a_validar', 'conferencia', 'pendencia', 'pendencia', 'pendencia'],
+  'classificação: a_validar e conferência são liberáveis; valor errado e código não classificado, não');
+
+-- (6) Lançamento ligado à folha que o pagou: a segunda folha da competência não paga de novo.
+INSERT INTO c VALUES ('dup', pg_temp.mk(3000.00));
+INSERT INTO folha.payroll_entry (account_id, contract_id, code_id, competencia, tipo_processo, valor)
+VALUES ('e0000000-0000-0000-0000-000000000027', pg_temp.cid('dup'), pg_temp.rub('ADIANTAMENTO_SALARIAL_PAGO'), '2026-10-01', 'adiantamento', 300.00);
+INSERT INTO r VALUES ('dup_ad1', folha.run_payroll_employee(pg_temp.run('ad10'), pg_temp.cid('dup')));
+SELECT pg_temp.folha('ad10b', 'adiantamento', '2026-10-01', '2026-10-20', 2);
+SELECT throws_like($$SELECT folha.run_payroll_employee(pg_temp.run('ad10b'), pg_temp.cid('dup'))$$,
+  'Folha de adiantamento sem lançamento para o contrato %', 'NEG: o segundo adiantamento não paga de novo o lançamento já pago');
+SELECT throws_like(
+  $$UPDATE folha.payroll_entry SET valor = 999 WHERE contract_id = pg_temp.cid('dup')$$,
+  'Lançamento % já foi calculado em folha não cancelada e não pode ser alterado nem apagado', 'NEG: lançamento já pago não é alterado');
+SELECT throws_like(
+  $$DELETE FROM folha.payroll_entry WHERE contract_id = pg_temp.cid('dup')$$,
+  'Lançamento % já foi calculado em folha não cancelada e não pode ser alterado nem apagado', 'NEG: lançamento já pago não é apagado');
+INSERT INTO folha.payroll_entry (account_id, contract_id, code_id, competencia, tipo_processo, valor)
+VALUES ('e0000000-0000-0000-0000-000000000027', pg_temp.cid('dup'), pg_temp.rub('ADIANTAMENTO_SALARIAL_PAGO'), '2026-10-01', 'adiantamento', 200.00);
+INSERT INTO r VALUES ('dup_ad2', folha.run_payroll_employee(pg_temp.run('ad10b'), pg_temp.cid('dup')));
+SELECT is(pg_temp.itens('dup_ad2'), 'ADIANTAMENTO_SALARIAL_PAGO=20000/lancamento', 'segundo adiantamento: só o lançamento novo (200,00)');
+-- Complementar em duas folhas (derivado): comissões de 400,00 e depois 100,00, sem mensal. INSS incremental:
+--   1ª: 400,00 x 7,5% = 30,00; 2ª: INSS(500,00) - INSS(400,00) = 37,50 - 30,00 = 7,50.
+INSERT INTO folha.payroll_entry (account_id, contract_id, code_id, competencia, tipo_processo, valor)
+VALUES ('e0000000-0000-0000-0000-000000000027', pg_temp.cid('dup'), pg_temp.rub('COMISSAO'), '2026-10-01', 'complementar', 400.00);
+INSERT INTO r VALUES ('dup_co1', folha.run_payroll_employee(pg_temp.run('co10'), pg_temp.cid('dup')));
+SELECT pg_temp.folha('co10b', 'complementar', '2026-10-01', '2026-10-31', 2);
+SELECT throws_like($$SELECT folha.run_payroll_employee(pg_temp.run('co10b'), pg_temp.cid('dup'))$$,
+  'Folha complementar sem lançamento para o contrato %', 'NEG: a segunda complementar não paga de novo o lançamento já pago');
+INSERT INTO folha.payroll_entry (account_id, contract_id, code_id, competencia, tipo_processo, valor)
+VALUES ('e0000000-0000-0000-0000-000000000027', pg_temp.cid('dup'), pg_temp.rub('COMISSAO'), '2026-10-01', 'complementar', 100.00);
+INSERT INTO r VALUES ('dup_co2', folha.run_payroll_employee(pg_temp.run('co10b'), pg_temp.cid('dup')));
+SELECT is(pg_temp.itens('dup_co2'), 'COMISSAO=10000/lancamento INSS_EMPREGADO=750/motor IRRF=0/motor FGTS_DEPOSITO=800/motor',
+  'segunda complementar derivado: só a comissão nova, com o INSS incremental (7,50)');
+SELECT is(round((pg_temp.res('dup_co1')->>'inss_empregado')::numeric * 100)::bigint, 3000::bigint, 'primeira complementar derivado: INSS 30,00');
+
+-- (8) Adiantamento: pendência a_validar já na folha de adiantamento; recusado depois da mensal.
+SELECT ok(pg_temp.pend('a1_ad') @> ARRAY['a_validar:irrf_adiantamento_sem_retencao_regra_quando_o_saldo_e_pago_em_outro_mes'],
+  'adiantamento: a regra de retenção não conferida já sai como pendência a_validar na própria folha');
+INSERT INTO folha.payroll_entry (account_id, contract_id, code_id, competencia, tipo_processo, valor)
+VALUES ('e0000000-0000-0000-0000-000000000027', pg_temp.cid('k1'), pg_temp.rub('ADIANTAMENTO_SALARIAL_PAGO'), '2026-10-01', 'adiantamento', 100.00);
+SELECT throws_like($$SELECT folha.run_payroll_employee(pg_temp.run('ad10b'), pg_temp.cid('k1'))$$,
+  'Contrato % já tem folha mensal ou rescisão calculada na competência 2026-10-01: o adiantamento não seria descontado',
+  'NEG: adiantamento depois da mensal da competência é recusado');
+
+-- (7) Férias que atravessam o mês: gozo de 20/09 a 19/10/2026 (30 dias), folha de férias de 09/2026.
+--     A mensal de OUTUBRO enxerga o período de gozo e recebe a pendência de cálculo.
+INSERT INTO c VALUES ('fx', pg_temp.mk(1900.00, 'clt', 'lucro_presumido', '2024-08-01', NULL, 0.01, 1.0000, 0.058));
+INSERT INTO folha.payroll_process_input (account_id, run_id, contract_id, parametros)
+VALUES ('e0000000-0000-0000-0000-000000000027', pg_temp.run('fe09'), pg_temp.cid('fx'),
+        '{"inicio_gozo": "2026-09-20", "periodo_aquisitivo_inicio": "2025-08-01", "dias_gozo": 30}');
+INSERT INTO r VALUES ('fx_fe', folha.run_payroll_employee(pg_temp.run('fe09'), pg_temp.cid('fx')));
+INSERT INTO r VALUES ('fx_out', folha.run_payroll_employee(pg_temp.run('m10'), pg_temp.cid('fx')));
+SELECT ok(pg_temp.pend('fx_out') @> ARRAY['pendencia:ferias_na_competencia_salario_e_inss_do_mes_nao_reapurados'],
+  'férias de 20/09 a 19/10: a mensal de outubro recebe a pendência (vale o período de gozo, não a competência da folha de férias)');
+SELECT pg_temp.folha('m11', 'mensal', '2026-11-01', '2026-11-30');
+INSERT INTO r VALUES ('fx_nov', folha.run_payroll_employee(pg_temp.run('m11'), pg_temp.cid('fx')));
+SELECT ok(NOT pg_temp.pend('fx_nov') @> ARRAY['pendencia:ferias_na_competencia_salario_e_inss_do_mes_nao_reapurados'],
+  'mês seguinte ao fim do gozo: sem a pendência');
+
+-- (10) Incidência com estado de validação; rubricas legadas inativas.
+SELECT is(
+  (SELECT string_agg(e.codigo || ':' || ri.tributo, ' ' ORDER BY e.codigo, ri.tributo)
+     FROM folha.rubric_incidence ri JOIN folha.earning_deduction_code e ON e.code_id = ri.code_id
+    WHERE e.account_id IS NULL AND ri.status_validacao = 'a_validar'),
+  'ABONO_PECUNIARIO:irrf ABONO_PECUNIARIO_TERCO:fgts ABONO_PECUNIARIO_TERCO:irrf ABONO_PECUNIARIO_TERCO:previdencia AVISO_PREVIO_INDENIZADO:previdencia FERIAS_DOBRA:irrf FERIAS_TERCO:previdencia MULTA_ART477:irrf',
+  'oito incidências globais a_validar (as demais, validadas nos pareceres)');
+SELECT ok(pg_temp.pend('ct08') @> ARRAY['a_validar:incidencia_FERIAS_TERCO_previdencia'],
+  'incidência a_validar usada no cálculo vira pendência (terço de férias na base previdenciária)');
+SELECT ok(pg_temp.pend('pa') @> ARRAY['a_validar:incidencia_MULTA_ART477_irrf'],
+  'multa do art. 477 lançada: a incidência de IRRF a_validar vira pendência');
+SELECT ok(pg_temp.pend('g01') @> ARRAY['a_validar:incidencia_AVISO_PREVIO_INDENIZADO_previdencia'],
+  'G01: a previdência do aviso indenizado (decidida por parâmetro a_validar) vira pendência de incidência');
+SELECT ok(NOT EXISTS (SELECT 1 FROM unnest(pg_temp.pend('cd03')) x WHERE x LIKE 'a_validar:incidencia_%'),
+  'CD-03: rubricas com incidência validada não geram pendência de incidência');
+SELECT ok(pg_temp.pend('q1') @> ARRAY['a_validar:incidencia_PREMIO_PROD_previdencia'],
+  'rubrica de conta nasce com incidência a_validar até ser conferida');
+SELECT is(
+  (SELECT string_agg(e.codigo, ' ' ORDER BY e.codigo) FROM folha.earning_deduction_code e WHERE NOT e.ativa),
+  'FERIAS_PROPORCIONAL FERIAS_VENCIDAS', 'rubricas legadas de férias inativas (não apagadas)');
+INSERT INTO c VALUES ('leg', pg_temp.mk(3000.00));
+INSERT INTO folha.payroll_entry (account_id, contract_id, code_id, competencia, valor)
+VALUES ('e0000000-0000-0000-0000-000000000027', pg_temp.cid('leg'), pg_temp.rub('FERIAS_VENCIDAS'), '2026-10-01', 10.00);
+SELECT throws_ok($$SELECT folha.run_payroll_employee(pg_temp.run('m10'), pg_temp.cid('leg'))$$,
+  'P0001', 'Rubrica FERIAS_VENCIDAS está inativa e não entra em cálculo', 'NEG: rubrica inativa não entra em cálculo');
+
+-- (11) Afastamento em mês cheio: dias de contrato menos dias afastados, limitados a 30.
+--      Outubro (31 dias) com afastamento de 01 a 30: 1 dia pago. Fevereiro (28) com afastamento de 01 a 27: 1 dia.
+INSERT INTO c VALUES ('b30', pg_temp.mk(3000.00)), ('bfev', pg_temp.mk(3000.00)), ('bz', pg_temp.mk(3000.00));
+INSERT INTO folha.contract_leave (account_id, contract_id, data_inicio, data_fim, motivo, suspende_pagamento) VALUES
+  ('e0000000-0000-0000-0000-000000000027', pg_temp.cid('b30'),  '2026-10-01', '2026-10-30', 'afastamento fictício', true),
+  ('e0000000-0000-0000-0000-000000000027', pg_temp.cid('bfev'), '2026-02-01', '2026-02-27', 'afastamento fictício', true),
+  ('e0000000-0000-0000-0000-000000000027', pg_temp.cid('bz'),   '2026-10-01', '2026-10-31', 'afastamento fictício', true);
+SELECT is(
+  ARRAY[(SELECT d.dias FROM folha.dias_proporcionais(pg_temp.cid('b30'), '2026-10-01') d),
+        (SELECT d.dias FROM folha.dias_proporcionais(pg_temp.cid('bfev'), '2026-02-01') d),
+        (SELECT d.dias FROM folha.dias_proporcionais(pg_temp.cid('bz'), '2026-10-01') d)],
+  ARRAY[1, 1, 0]::numeric[],
+  'afastamento derivado: 1 dia trabalhado paga 1/30 (em mês de 31 e de 28 dias); mês inteiro afastado paga zero');
+INSERT INTO r VALUES ('b30', folha.run_payroll_employee(pg_temp.run('m10'), pg_temp.cid('b30')));
+SELECT is(round((pg_temp.res('b30')->>'total_proventos')::numeric * 100)::bigint, 10000::bigint,
+  'afastamento derivado: 3.000,00 / 30 x 1 = 100,00');
+
+-- (12) Folha mensal com base zero (mês inteiro afastado): pendência de conferência.
+INSERT INTO r VALUES ('bz', folha.run_payroll_employee(pg_temp.run('m10'), pg_temp.cid('bz')));
+SELECT ok(pg_temp.pend('bz') @> ARRAY['pendencia:folha_mensal_com_base_zero_conferir'],
+  'folha mensal com base zero gera pendência');
+SELECT ok(NOT pg_temp.pend('b30') @> ARRAY['pendencia:folha_mensal_com_base_zero_conferir'], 'base maior que zero: sem a pendência');
+
+-- (13) Tamanho da fórmula e código de base global.
+SELECT throws_ok(
+  $$INSERT INTO folha.rubric_rule (account_id, camada, contract_id, code_id, forma_calculo, formula, vigencia_inicio, fonte)
+    VALUES ('e0000000-0000-0000-0000-000000000027', 'contrato', pg_temp.cid('leg'), pg_temp.rub('COMISSAO'), 'formula',
+            ('{"op":"soma","args":[{"num":1},{"num":1.' || repeat('1234567890', 1500) || '}]}')::jsonb, '2026-01-01', 'x')$$,
+  '23514', NULL, 'NEG: fórmula acima do tamanho máximo é recusada');
+SELECT throws_ok(
+  $$INSERT INTO folha.calculation_base (account_id, codigo, descricao, finalidade)
+    VALUES ('e0000000-0000-0000-0000-000000000027', 'INSS_MENSAL', 'sombra', 'outra')$$,
+  '23514', NULL, 'NEG: base de conta não repete código de base global');
+
+-- (14) A recusa não diz se o identificador alheio existe: mesma mensagem para rubrica de outra conta e inexistente.
+SELECT throws_ok(
+  $$INSERT INTO folha.payroll_entry (account_id, contract_id, code_id, competencia, valor)
+    VALUES ('e0000000-0000-0000-0000-000000000027', pg_temp.cid('k1'), (SELECT code_id FROM alheio), '2026-11-01', 1)$$,
+  '23514', 'payroll_entry: rubrica inexistente ou indisponível para esta conta', 'rubrica de outra conta: mensagem neutra');
+SELECT throws_ok(
+  $$INSERT INTO folha.payroll_entry (account_id, contract_id, code_id, competencia, valor)
+    VALUES ('e0000000-0000-0000-0000-000000000027', pg_temp.cid('k1'), '00000000-0000-0000-0000-00000000dead', '2026-11-01', 1)$$,
+  '23514', 'payroll_entry: rubrica inexistente ou indisponível para esta conta', 'rubrica inexistente: a mesma mensagem');
+
+-- (9) Vigência do IRRF de 2026 fechada.
+SELECT is(
+  (SELECT t.vigencia_fim FROM folha.tax_table_version t WHERE t.tipo = 'irrf' AND t.vigencia_inicio = '2026-01-01'),
+  '2026-12-31'::date, 'a tabela do IRRF de 2026 fecha em 31/12/2026');
 
 SELECT * FROM finish();
 ROLLBACK;
