@@ -185,11 +185,19 @@ WITH novo AS (
     ('e0000000-0000-0000-0000-000000000025', '2026-09-01', NULL)
   RETURNING run_id, competencia)
 INSERT INTO f SELECT to_char(competencia, 'YYYY-MM'), run_id FROM novo;
+-- Fixture da fatia 4 (migration 0027): folha só nasce em rascunho e só fecha pelo fluxo
+-- (cálculo, aprovação, fechamento). Este cenário só precisa de UMA folha já fechada para o
+-- negativo "folha fechada não recebe cálculo": ela entra como superusuário, com os gatilhos
+-- desligados só para este INSERT. O esperado do negativo não mudou.
+RESET SESSION AUTHORIZATION;
+SET LOCAL session_replication_role = replica;
 WITH novo AS (
   INSERT INTO folha.payroll_run (account_id, competencia, data_pagamento, status)
   VALUES ('e0000000-0000-0000-0000-000000000025', '2026-08-01', '2026-08-31', 'closed')
   RETURNING run_id)
 INSERT INTO f SELECT 'fechada', run_id FROM novo;
+SET LOCAL session_replication_role = origin;
+SET LOCAL SESSION AUTHORIZATION dnex_folha_ci_login;
 WITH novo AS (
   INSERT INTO folha.payroll_run (account_id, competencia, data_pagamento, employer_id)
   SELECT 'e0000000-0000-0000-0000-000000000025', '2026-07-01', '2026-07-31', k.employer_id
@@ -692,7 +700,7 @@ SELECT is(
   (SELECT count(*) FROM pg_policies p
     WHERE p.schemaname = 'folha'
       AND position('SELECT folha.current_account_id()' IN COALESCE(p.qual, '') || COALESCE(p.with_check, '')) > 0),
-  19::bigint, '19 policies do schema folha usam (SELECT folha.current_account_id()): 12 das 0014/0018 e 7 da 0024');
+  31::bigint, '31 policies do schema folha usam (SELECT folha.current_account_id()): 12 das 0014/0018, 7 da 0024 e 12 da 0026');
 SELECT is_empty(
   $$SELECT p.tablename, p.policyname FROM pg_policies p
      WHERE p.schemaname = 'folha'
