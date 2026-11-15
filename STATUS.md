@@ -2,62 +2,105 @@
 
 ## Frente 15/11/2026 — Correção do motor de eventos de vida (migration 0023)
 
-### O que foi feito
+Estado: migration e testes fechados contra banco real. Replay local do zero (Postgres 17 + pgTAP em Docker, roteiro
+do CI): 6 arquivos, 493 asserções, todas passando (17 + 25 + 371 + 12 + 47 + 21). Nada foi aplicado em produção.
+PR 2 segue em rascunho.
+
+### O que mudou
 
 - **Migration 0023** (`migrations/supabase/0023_folha_motor_eventos_vida_correcao.supabase.sql`):
-  - Tabela `folha.payroll_parameter` criada com seed de 33 parâmetros normativos por vigência (13º, férias, rescisão). Parâmetros marcados "A VALIDAR NA FONTE" nos pareceres entram com `status_validacao = 'a_validar'`.
-  - Funções auxiliares `folha.get_param`, `folha.avos_13o` e `folha.avos_ferias` criadas para lógica reutilizável e testável.
-  - `folha.calc_13o` reescrita: avos por ano civil com fração ≥15 dias; 1ª parcela = metade sem INSS/IRRF, com FGTS; 2ª parcela compensa adiantamento, INSS em separado sobre bruto total, IRRF exclusivo; novos parâmetros `p_adiantamento_pago`, `p_media_variaveis`, `p_num_dependentes`; retorna `fgts`, `adiantamento_compensado`, `pendencias_validacao`.
-  - `folha.calc_ferias` reescrita: escala de faltas (30/24/18/12), abono pecuniário (max 1/3), dobra art. 137, INSS/FGTS só sobre parte gozada, IRRF em separado; novos parâmetros `p_dias_gozo`, `p_dias_abono`, `p_faltas_injustificadas`, `p_periodo_aquisitivo_inicio`, `p_periodo_concessivo_fim`, `p_salario_com_medias`; retorna `valor_abono`, `terco_abono`, `valor_dobra`, `inss`, `irrf`, `valor_liquido`, `fgts`, `pendencias_validacao`.
-  - `folha.calc_rescisao` reescrita: matriz motivo×verba para 8 motivos (sem_justa_causa, pedido_demissao, justa_causa, acordo_484a, termino_prazo, antecipacao_empregador, antecipacao_empregado, falecimento); motivo desconhecido/nulo levanta exceção; regime não-CLT levanta exceção; aviso proporcional (30+3/ano, teto 90); multa FGTS calculada sobre base do extrato + depósito rescisório, devolvida em campo próprio FORA dos proventos e do líquido; INSS/IRRF via motor existente; limite art. 477 §5; novos parâmetros `p_aviso_modo`, `p_dias_aviso_trabalhados`, `p_fgts_base_extrato`, `p_prejuizo_art480`, `p_num_dependentes`, `p_rendimentos_ja_pagos_no_mes`, `p_salario_com_medias`; retorna `fgts_deposito_rescisao`, `dias_aviso`, `data_projetada`, `inss_mensal`, `inss_13`, `irrf_mensal`, `irrf_13`, `indenizacao_479`, `desconto_aviso`, `desconto_art480`, `pendencias_validacao`.
-  - `folha.calc_inss` corrigida: faixas contínuas usando `v_prev_ls` como piso efetivo (elimina perda de 1 centavo por faixa, achado V5/C3).
-  - Rubricas corrigidas via UPDATE idempotente: `RESC_FERIAS_PROP` e `RESC_FERIAS_VENCIDAS` sem INSS/IRRF/FGTS (V2); `ABONO_PECUNIARIO` sem FGTS (V3); `DECIMO_TERCEIRO_1A` sem INSS (V4).
-  - ACL: `REVOKE ALL FROM PUBLIC, anon, authenticated` + GRANT apenas a `dnex_gestao_folha_worker` e `dnex_gestao_data_owner` em todas as funções e na tabela nova. RLS na tabela `payroll_parameter`.
+  - `folha.payroll_parameter`: 38 parâmetros normativos por vigência (a partir de 01/01/2026), 15 deles `a_validar`.
+    Reaplicar a migration não sobrescreve valor nem validação (`ON CONFLICT DO NOTHING`).
+  - Auxiliares: `get_param`, `params_a_validar`, `avos_13o`, `avos_ferias`, `calc_irrf_separado`.
+  - `calc_inss`: faixas contínuas (deixou de perder 1 centavo de base por faixa).
+  - `calc_13o(contrato, data_pagamento, parcela, ...)`: parcela 1 = adiantamento (metade, sem INSS e IRRF, FGTS no mês);
+    2 = quitação (INSS e IRRF em separado sobre o bruto total, adiantamento compensado, FGTS sobre a diferença);
+    3 = ajuste de variáveis de janeiro. Avos por mês do ano civil com 15 dias ou mais, sem piso.
+  - `calc_ferias(contrato, inicio_gozo, inicio_periodo_aquisitivo, ...)`: escala de faltas, dias de gozo, abono (máximo
+    de 1/3), dobra só dos dias gozados depois do concessivo, INSS e FGTS sobre férias gozadas + terço, IRRF em
+    separado, líquido e data-limite de pagamento. Recusa período aquisitivo incompleto.
+  - `calc_rescisao(contrato, ultimo_dia, motivo, aviso_modo, ...)`: 8 motivos, aviso de 30 + 3 dias por ano (teto 90),
+    projeção do aviso nos avos, férias vencidas pelo inventário informado, proporcionais pelo período aquisitivo em
+    curso, arts. 479 e 480, limite do art. 477 § 5º, INSS e IRRF do mês e do 13º, depósito do FGTS. A multa do FGTS
+    sai em campo próprio (`multa_fgts`), fora dos proventos e do líquido, e só é calculada com a base do extrato.
+    Motivo desconhecido ou nulo e regime que não é CLT ou aprendiz levantam exceção.
+  - As assinaturas antigas (`calc_ferias(uuid,date)`, `calc_13o(uuid,date,integer)`, `calc_rescisao(uuid,date,text)`)
+    são removidas.
+  - ACL das 9 funções: `REVOKE ALL FROM PUBLIC, anon, authenticated`; `GRANT EXECUTE` só a `dnex_gestao_folha_worker`
+    e `dnex_gestao_data_owner` (os papéis que já executavam pelas 0016 e 0019).
+  - Rubricas: férias indenizadas da rescisão sem INSS, IRRF e FGTS; abono sem FGTS; 1ª parcela do 13º sem INSS.
+- **Testes**:
+  - `tests/folha/0023_eventos_vida_dourados.pgtap.sql`: `plan(371)`. CT-01 a CT-13 e G01 a G12 dos pareceres em
+    centavos, G09b, as 4 alternativas de INSS sobre a projeção, 23 negativos, ACL, rubricas e parâmetros.
+  - `tests/folha/eventos_vida_calculo.pgtap.sql`: reescrito (`plan(47)`), com valor exato do comportamento correto.
+  - `tests/folha/golden_cases_calculo.pgtap.sql`: o `todo` do centavo do INSS virou asserção normal.
 
-- **Testes dourados** (`tests/folha/0023_eventos_vida_dourados.pgtap.sql`):
-  - Casos CT-01 a CT-06 (13º salário) implementados com valores exatos dos pareceres.
-  - Setup de contratos de teste isolados por tenant.
-  - Método INSS adotado: soma exata das faixas contínuas, ROUND ao final (método A dos pareceres).
+### Decisões adotadas (revisáveis pelo dono)
 
-### Decisões adotadas pela coordenação (revisáveis pelo dono)
-
-| Decisão | Valor adotado | Alternativa | Fonte/Justificativa |
+| Decisão | Adotado | Alternativa | Motivo |
 |---|---|---|---|
-| Fração mínima 13º | ≥15 dias (igual ou superior) | >15 dias (Decreto 10.854 art.78 §4) | Lei 4.090/1962 art.1 §2 prevalece; mais favorável ao empregado |
-| INSS sobre aviso indenizado | Não incide (default=0) | Incide | STJ Tema 478; conservador para o empregador |
-| INSS sobre avos da projeção | Incide (default=1) | Não incide | Orientação Receita; parametrizado |
-| Divisor do saldo de salário | 30 | 31 ou dias reais do mês | Convenção produto; marcado A VALIDAR |
-| Projeção no acordo 484-A | Requer parâmetro explícito | Default automático | Sem consenso jurisprudencial; pendência se ausente |
-| Indenização art. 479 sem data_termo | 30 dias default | Zero | Conservador; marcado como pendência |
-| Método arredondamento INSS | Soma exata + ROUND final (A) | Truncamento por faixa (B) | Mais comum em sistemas; ambos documentados |
+| Fração do avo do 13º | 15 dias ou mais | mais de 15 (Decreto 10.854, art. 78, § 4º) | Lei 4.090/1962; recomendação do parecer |
+| Método do INSS | soma das faixas, arredondada no final (A) | truncar por faixa (B) | parecer de rescisão usa A; A VALIDAR |
+| Redutor da Lei 15.270 no IRRF em separado | aferido pelo rendimento bruto (`irrf_redutor_referencia_bruto = 1`) | pela base após deduções, como `calc_irrf` | é o que o caso G03 exige; ver `scratch/DIVERGENCIAS-PARECER.md` |
+| INSS sobre aviso indenizado | não incide | incide | parecer, item 2.1.8; A VALIDAR |
+| INSS do 13º sobre os avos da projeção | incide | não incide (valores alternativos testados) | padrão proposto no parecer; A VALIDAR |
+| IRRF sobre abono e sobre a dobra | não retém | retém | parecer, item 2.6; A VALIDAR |
+| Divisor do saldo | 30; mês inteiro = 30 | dias reais do mês | convenção dos casos; A VALIDAR |
+| Aviso no pedido de demissão | 30 dias | proporcional | padrão do parecer; A VALIDAR |
+| Projeção do aviso no acordo | informada pelo responsável; sem ela, erro | padrão automático | parecer: o motor não decide |
+| Adiantamento do 13º na rescisão | compensa primeiro o 13º; o excedente entra no limite do art. 477 § 5º | tudo dentro do limite | Decreto 10.854, art. 82, parágrafo único |
+| Adiantamento do 13º fora de fevereiro a novembro | calcula e devolve pendência | recusar | não bloquear o pagamento junto com as férias |
+| Médias de variáveis | recebidas prontas (`p_remuneracao`, `p_media_variaveis`, `p_soma_variaveis`) | apurar no motor | faltam tabelas de lançamentos |
 
 ### Pendências "A VALIDAR NA FONTE"
 
-Todas listadas em `folha.payroll_parameter` com `status_validacao = 'a_validar'`:
-- `divisor_variaveis_quitacao` e `divisor_variaveis_ajuste`
-- `ferias_fracionamento_max_periodos`, `ferias_fracionamento_minimo_1`, `ferias_fracionamento_minimo_2`
-- `inss_aviso_indenizado_incide` e `inss_projecao_aviso_incide`
-- `divisor_saldo_salario`
-- Tabelas INSS/IRRF 2026 (seed 0015 não conferido contra portaria vigente)
-- Redutor Lei 15.270/2025: base bruta ou líquida; aferição em férias separadas
-- IRRF sobre abono pecuniário, terço do abono e dobra
-- Avos do 13º em afastamentos previdenciários e licença-maternidade
-- Critério de médias (valor vs quantidade física) e CCT/ACT
-- Prazo e forma do FGTS rescisório (FGTS Digital)
-- Contagem do prazo do art. 477 §6 CLT
+Em `folha.payroll_parameter` com `status_validacao = 'a_validar'` (as funções devolvem `a_validar:<chave>` quando usam):
+`divisor_variaveis_quitacao`, `divisor_variaveis_ajuste`, `ferias_fracionamento_max_periodos`,
+`ferias_fracionamento_minimo_1`, `ferias_fracionamento_minimo_2`, `irrf_abono_pecuniario_incide`,
+`irrf_dobra_ferias_incide`, `irrf_redutor_referencia_bruto`, `irrf_redutor_coef_a`, `irrf_redutor_coef_b`,
+`aviso_previo_dias_por_ano`, `prazo_pagamento_rescisao_dias`, `divisor_saldo_salario`,
+`inss_aviso_indenizado_incide`, `inss_projecao_aviso_incide`.
 
-### O que NÃO foi executado localmente
+Fora da tabela, ainda sem validação:
+- Tabelas de INSS e IRRF de 2026 do seed 0015 (portaria e Receita) e método de arredondamento do INSS e do FGTS.
+- Redutor da Lei 15.270/2025: critério (bruto ou base), alcance no 13º, aferição nas férias em separado.
+- Avos do 13º e período aquisitivo em afastamentos, licença-maternidade e faltas injustificadas.
+- Divisor da média de variáveis no adiantamento; critério de médias (valor ou quantidade) e CCT/ACT.
+- Dia não útil no prazo do art. 145 da CLT; contagem do prazo do art. 477, § 6º; FGTS rescisório (FGTS Digital).
+- Extinção antecipada do contrato de aprendizagem (arts. 479 e 480): o motor calcula e devolve pendência.
 
-- Execução real do SQL contra PostgreSQL (ambiente sem psql/banco disponível).
-- Testes pgTAP rodando em CI ou localmente.
-- Validação das tabelas INSS/IRRF 2026 contra portaria/Receita vigentes.
-- Revisão independente dos casos dourados por segundo auditor.
-- Atualização da documentação funcional no vault `/Volumes/dnex/DNEX-Documentacao` (host não acessível nesta worktree Windows).
-- Casos CT-07 a CT-13 e G01-G12 ainda não implementados no arquivo de testes dourados (dependem de variáveis, períodos aquisitivos e dados de extrato FGTS que requerem setup adicional).
+### Pendências de engenharia
+
+- **Consumidores das assinaturas antigas não verificados** (dnex-hub, funções de borda, outros repositórios): quem
+  chama `calc_ferias(uuid,date)`, `calc_13o(uuid,date,integer)` ou `calc_rescisao(uuid,date,text)` quebra ao aplicar
+  a 0023. Conferir antes de aplicar em produção.
+- `tests/folha/run_eventos_vida_tests.py` ficou obsoleto: usa as assinaturas antigas e grava dados de teste direto
+  no projeto Supabase. Não foi executado nem alterado; decidir se sai do repositório.
+- `calc_irrf` (folha mensal) segue com o critério de base líquida e as constantes fixas (V6, C4); a folha mensal e
+  os eventos de vida usam critérios diferentes do redutor até a validação.
+- Parâmetros e tabelas só existem a partir de 01/01/2026: cálculo com data anterior levanta erro.
+- IRRF das férias usa a data de início do gozo como competência (o pagamento ocorre antes; regime de caixa a tratar).
+- Projeção do aviso que atravessa o ano: o 13º soma os avos dos dois anos, com pendência (falta separar por ano).
+- Férias: sem validação do fracionamento (14 e 5 dias, até 3 períodos) nem controle de saldo entre gozos; devolve pendência.
+- Rescisão: sem rendimentos já pagos no mês, médias, faltas no saldo, aviso misto, multa do art. 477, § 8º, rescisão
+  indireta e culpa recíproca. Contrato a prazo com cláusula assecuratória: usar `sem_justa_causa` ou `pedido_demissao`.
+- Sem tabelas de período aquisitivo, gozo, adiantamento de 13º e evento de rescisão: os dados entram por parâmetro e
+  nada é persistido nem gravado em `calculation_trace`.
+- Entradas monetárias negativas (`p_remuneracao`, variáveis) não são recusadas.
+- Contabilização (parecer próprio, casos GC-01 a GC-08): fora desta entrega.
+- **Documentação funcional** (vault `DNEX-Documentacao`): não atualizada nesta frente; a tarefa era restrita a esta
+  worktree. Pendência documental aberta: módulo Folha, funções de 13º, férias e rescisão.
+- Segunda conferência independente dos casos dourados por profissional de DP (os pareceres pedem) ainda não feita.
+
+### Verificação
+
+- Feito: replay do zero em banco local descartável; reaplicação da 0023 sobre banco já migrado; revisão de código
+  independente (somente leitura), com os achados corrigidos ou listados acima.
+- Não feito: execução em produção ou no Supabase; teste das telas; validação das fontes normativas.
 
 ### Migrations anteriores (0014–0022)
 
-Inalteradas. A correção é exclusivamente via migration 0023 com `CREATE OR REPLACE FUNCTION` e UPDATEs idempotentes em rubricas.
+Inalteradas.
 
 ---
 
