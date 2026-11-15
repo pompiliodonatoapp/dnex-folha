@@ -3,7 +3,7 @@
 -- Executar com: psql -f tests/folha/0014_folha_rls_isolation.pgtap.sql
 BEGIN;
 
-SELECT plan(18);
+SELECT plan(19);
 
 -- ---------------------------------------------------------------------------
 -- Setup: tenants e dados de teste
@@ -60,9 +60,16 @@ SELECT is(
 -- exige asserção válida com nonce single-use. Em produção, o middleware chama
 -- begin_request; em teste unitário, usamos o fallback direto da função current_account_id().
 -- ---------------------------------------------------------------------------
+-- O teste roda como superusuario, que ignora RLS mesmo com FORCE: a leitura e feita
+-- com o papel de trabalho e o resultado e conferido depois de voltar ao papel original.
 SET LOCAL folha.account_id = 'a0000000-0000-0000-0000-000000000001';
+SET LOCAL ROLE dnex_gestao_folha_worker;
+SELECT count(*) AS proprios_a FROM folha.employee WHERE account_id = 'a0000000-0000-0000-0000-000000000001' \gset
+SELECT count(*) AS alheios_a FROM folha.employee WHERE account_id = 'b0000000-0000-0000-0000-000000000002' \gset
+RESET ROLE;
+SELECT is(:proprios_a::bigint, 1::bigint, 'Tenant A ve o proprio employee (o teste nao passa por tabela vazia)');
 SELECT is(
-  (SELECT count(*) FROM folha.employee WHERE account_id = 'b0000000-0000-0000-0000-000000000002'),
+  :alheios_a::bigint,
   0::bigint,
   'Tenant A não vê employees do Tenant B'
 );
@@ -71,8 +78,11 @@ SELECT is(
 -- 6. Tenant B não lê dados de Tenant A
 -- ---------------------------------------------------------------------------
 SET LOCAL folha.account_id = 'b0000000-0000-0000-0000-000000000002';
+SET LOCAL ROLE dnex_gestao_folha_worker;
+SELECT count(*) AS alheios_b FROM folha.employee WHERE account_id = 'a0000000-0000-0000-0000-000000000001' \gset
+RESET ROLE;
 SELECT is(
-  (SELECT count(*) FROM folha.employee WHERE account_id = 'a0000000-0000-0000-0000-000000000001'),
+  :alheios_b::bigint,
   0::bigint,
   'Tenant B não vê employees do Tenant A'
 );
@@ -143,8 +153,7 @@ SELECT table_privs_are(
 -- ---------------------------------------------------------------------------
 -- Cleanup
 -- ---------------------------------------------------------------------------
-DELETE FROM folha.employee WHERE cpf IN ('11111111111', '22222222222');
-DELETE FROM folha.auditoria WHERE actor = 'test';
+-- Sem DELETE: a auditoria e append-only; a transacao inteira e desfeita.
 
 SELECT * FROM finish();
 ROLLBACK;
