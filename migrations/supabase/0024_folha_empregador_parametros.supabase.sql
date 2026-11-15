@@ -1,14 +1,19 @@
--- DNEX Folha — Migration 0024: empregador em quatro níveis e parâmetros por vigência.
+-- DNEX Folha — Migration 0024: empregador em quatro níveis e conta da sessão.
 --
 -- Cria: employer, employer_regime, establishment, establishment_fap, tax_allocation,
 --       tax_allocation_detail, contract_tax_allocation;
---       funções assertion_account_id() e validar_rateio_contrato().
+--       funções request_context_account_id() e validar_rateio_contrato().
 -- Parâmetros por vigência: NÃO cria tabela nem função. O catálogo é folha.payroll_parameter
 --       e a leitura é folha.get_param, ambos da migration 0023; aqui o catálogo só ganha a
 --       constraint de vigências sem sobreposição.
--- Corrige: folha.current_account_id() — a reserva por parâmetro de sessão (folha.account_id)
---       só vale para o papel de teste dnex_folha_ci, que esta migration NÃO cria.
+-- Corrige: folha.current_account_id() (ver seção 2).
 -- Adiciona: employer_id/establishment_id (anuláveis) em employee, employment_contract e payroll_run.
+--
+-- NÃO APLICAR EM PRODUÇÃO enquanto o dnex-gestao não tiver um grupo de principal para a
+-- Folha: hoje nenhum login com acesso às tabelas da Folha consegue abrir contexto pelo
+-- protocolo do gestao_auth (seção 2), e depois desta migration nenhuma sessão de
+-- aplicação tem conta. Isso é intencional (falha fechada), mas torna a Folha inoperante
+-- para o worker até a dependência ser resolvida.
 --
 -- Vigência: vigencia_inicio e vigencia_fim são datas INCLUSIVAS (mesma leitura da 0016:
 -- "vigencia_fim >= competencia"); vigencia_fim NULL = em aberto. A não sobreposição é uma
@@ -17,18 +22,96 @@
 -- a um trigger porque trigger de sobreposição não é seguro sob concorrência sem trava, e a
 -- índice único parcial porque este não detecta intervalos que se cruzam.
 --
--- Isolamento: todas as tabelas novas têm account_id, RLS com FORCE e policy pela conta da sessão.
--- As chaves estrangeiras entre as tabelas novas são compostas (account_id, id): um registro
--- não pode apontar para pai de outra conta, nem conhecendo o uuid.
+-- Isolamento: todas as tabelas novas têm account_id, RLS com FORCE e policy pela conta da
+-- sessão. As chaves estrangeiras são compostas com account_id, e a hierarquia é coerente
+-- dentro da conta: estabelecimento preso ao seu empregador em contrato e folha; lotação e
+-- contrato do rateio presos ao mesmo empregador.
 --
--- Reversão (manual, nesta ordem): DROP de contract_tax_allocation, tax_allocation_detail,
--- tax_allocation, establishment_fap e employer_regime; remover as colunas
--- employer_id/establishment_id de payroll_run, employment_contract e employee; DROP de
--- establishment e employer; DROP da função validar_rateio_contrato; DROP do índice
--- employment_contract_account_contract_key; DROP das constraints payroll_parameter_vigencia_valida
--- e payroll_parameter_sem_sobreposicao.
--- NÃO restaurar o corpo antigo de current_account_id(): ele é a falha corrigida aqui.
+-- Aplicação: uma transação; lock_timeout de 5 s (os ALTER TABLE em employee,
+-- employment_contract, payroll_run e payroll_parameter pedem ACCESS EXCLUSIVE: se houver
+-- sessão longa, a migration falha inteira em vez de enfileirar atrás dela); as
+-- pré-condições são conferidas antes de qualquer DDL e abortam com mensagem própria.
+-- Reversão: 0024_folha_empregador_parametros.supabase.down.sql (restaura corpo e GRANTs
+-- de current_account_id() da 0014; leia o aviso no topo daquele arquivo).
 BEGIN;
+
+SET LOCAL lock_timeout = '5s';
+
+-- ---------------------------------------------------------------------------
+-- 0. Pré-condições (falha limpa, antes de qualquer alteração)
+-- ---------------------------------------------------------------------------
+DO $$
+DECLARE
+  v_faltando text;
+BEGIN
+  -- 0.1 O papel de teste só pode existir em banco de CI. O critério de "banco de CI" é o
+  --     schema-marcador que tests/ci/bootstrap.sql cria, como superusuário, antes das migrations.
+  IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'dnex_folha_ci')
+     AND NOT EXISTS (
+       SELECT 1
+         FROM pg_catalog.pg_namespace n
+         JOIN pg_catalog.pg_roles r ON r.oid = n.nspowner
+        WHERE n.nspname = 'dnex_folha_ci_marcador' AND r.rolsuper)
+  THEN
+    RAISE EXCEPTION '0024: o papel de teste dnex_folha_ci existe neste cluster, mas este banco não é de CI (falta o schema-marcador dnex_folha_ci_marcador de dono superusuário). Remova o papel antes de aplicar.'
+      USING ERRCODE = 'object_not_in_prerequisite_state';
+  END IF;
+
+  -- 0.2 Objetos do protocolo de contexto do gestao_auth que esta migration lê.
+  SELECT string_agg(x.nome, ', ') INTO v_faltando
+    FROM (VALUES
+      ('gestao_auth.request_context',
+         to_regclass('gestao_auth.request_context') IS NULL),
+      ('gestao_auth.access_assertion',
+         to_regclass('gestao_auth.access_assertion') IS NULL),
+      ('gestao_auth.assert_authorization_principal_v1(name, text)',
+         to_regprocedure('gestao_auth.assert_authorization_principal_v1(name, text)') IS NULL),
+      ('gestao_auth.is_active_scope_v1(uuid, uuid, uuid)',
+         to_regprocedure('gestao_auth.is_active_scope_v1(uuid, uuid, uuid)') IS NULL)
+    ) AS x(nome, ausente)
+   WHERE x.ausente;
+  IF v_faltando IS NOT NULL THEN
+    RAISE EXCEPTION '0024: faltam objetos do protocolo de contexto do dnex-gestao: %', v_faltando
+      USING ERRCODE = 'object_not_in_prerequisite_state';
+  END IF;
+
+  -- 0.3 Quem aplica vira dono das funções SECURITY DEFINER desta migration e precisa poder
+  --     ler e executar os objetos acima.
+  IF NOT (has_table_privilege(current_user, 'gestao_auth.request_context', 'SELECT')
+          AND has_table_privilege(current_user, 'gestao_auth.access_assertion', 'SELECT')
+          AND has_function_privilege(current_user, 'gestao_auth.assert_authorization_principal_v1(name, text)', 'EXECUTE')
+          AND has_function_privilege(current_user, 'gestao_auth.is_active_scope_v1(uuid, uuid, uuid)', 'EXECUTE'))
+  THEN
+    RAISE EXCEPTION '0024: o papel % não lê gestao_auth.request_context/access_assertion ou não executa as funções de validação do gestao_auth; a conta da sessão ficaria sempre nula', current_user
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
+
+  -- 0.4 A conferência do rateio (seção 5) roda com row_security = off para nunca ser
+  --     enganada pela RLS; isso exige dono que ignore RLS.
+  IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles
+                  WHERE rolname = current_user AND (rolsuper OR rolbypassrls)) THEN
+    RAISE EXCEPTION '0024: o papel % não é superusuário nem tem BYPASSRLS; a conferência do rateio do contrato falharia em toda gravação', current_user
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
+
+  -- 0.5 Extensão da constraint de exclusão.
+  IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_available_extensions WHERE name = 'btree_gist') THEN
+    RAISE EXCEPTION '0024: a extensão btree_gist não está disponível neste servidor'
+      USING ERRCODE = 'feature_not_supported';
+  END IF;
+
+  -- 0.6 O catálogo de parâmetros (0023) não pode ter vigências sobrepostas já gravadas.
+  SELECT string_agg(DISTINCT a.chave, ', ') INTO v_faltando
+    FROM folha.payroll_parameter a
+    JOIN folha.payroll_parameter b
+      ON b.chave = a.chave AND b.parameter_id <> a.parameter_id
+     AND daterange(a.vigencia_inicio, a.vigencia_fim, '[]') && daterange(b.vigencia_inicio, b.vigencia_fim, '[]');
+  IF v_faltando IS NOT NULL THEN
+    RAISE EXCEPTION '0024: folha.payroll_parameter tem vigências sobrepostas nas chaves: %', v_faltando
+      USING ERRCODE = 'object_not_in_prerequisite_state';
+  END IF;
+END
+$$;
 
 -- ---------------------------------------------------------------------------
 -- 1. Extensão para constraint de exclusão com igualdade + sobreposição de intervalo
@@ -36,74 +119,144 @@ BEGIN;
 CREATE EXTENSION IF NOT EXISTS btree_gist WITH SCHEMA extensions;
 
 -- ---------------------------------------------------------------------------
--- 2. Correção de segurança: conta da sessão
+-- 2. Conta da sessão
 --
---    Antes (0014): current_account_id() era SECURITY DEFINER e devolvia, como reserva,
---    o parâmetro de sessão folha.account_id, que qualquer sessão pode definir com SET.
---    O worker podia, assim, escolher a conta.
+--    Antes (0014): current_account_id() era SECURITY DEFINER e tinha dois defeitos.
+--    (a) Procurava em gestao_auth.access_assertion uma asserção NÃO consumida cujo
+--        assertion_id fosse o valor do GUC dnex.context_nonce. No protocolo do gestao_auth,
+--        begin_request CONSOME a asserção e grava no GUC a chave de
+--        gestao_auth.request_context, não o assertion_id. Em fluxo real a conta vinha
+--        nula; e quem conhecesse um assertion_id ainda não consumido podia usá-lo em
+--        SET dnex.context_nonce como credencial reutilizável, sem vínculo com login,
+--        processo ou transação.
+--    (b) Aceitava, como reserva, o parâmetro de sessão folha.account_id, que qualquer
+--        sessão define com SET.
 --
---    Agora são duas funções:
---    a) assertion_account_id(): SECURITY DEFINER, lê SOMENTE a asserção de
---       gestao_auth.access_assertion apontada pelo nonce dnex.context_nonce.
---       É o caminho de produção, inalterado.
---    b) current_account_id(): SECURITY INVOKER. Precisa ser INVOKER porque dentro de
---       função SECURITY DEFINER current_user é o dono da função, nunca o papel da
---       sessão, e a condição do papel de teste jamais seria verdadeira (nem falsa de
---       forma útil). Devolve a asserção; só se current_user for dnex_folha_ci (papel
---       criado no bootstrap de CI, inexistente em produção) aceita a reserva.
---       Chamada de dentro de função SECURITY DEFINER, a reserva nunca vale.
+--    Agora:
+--    request_context_account_id() (SECURITY DEFINER): devolve a conta do contexto da
+--    transação, validado como gestao_auth.has_permission valida (dnex-gestao,
+--    0007_producer_principal:666-740): linha de request_context do nonce, presa a
+--    session_user + PID + txid e dentro da validade; asserção de origem idêntica, consumida
+--    naquele instante e não revogada; principal do login conferido por
+--    gestao_auth.assert_authorization_principal_v1; escopo ativo por
+--    gestao_auth.is_active_scope_v1. As duas últimas são as funções do próprio gestao,
+--    reutilizadas. Qualquer falha devolve NULL (nenhuma linha visível, nenhuma gravação).
+--    O gestao não tem função que devolva a conta do contexto; a leitura das duas tabelas
+--    fica aqui até existir (dependência registrada na ADR).
+--    Não confere permissão: a lista fechada de has_permission não tem permissão da Folha.
+--    O que esta função estabelece é a CONTA; o que cada papel pode fazer é o GRANT.
+--
+--    current_account_id() (SECURITY INVOKER): contexto acima; a reserva por
+--    folha.account_id só vale quando current_user é dnex_folha_ci E o banco tem o
+--    schema-marcador de CI com dono superusuário. Precisa ser INVOKER: dentro de função
+--    SECURITY DEFINER current_user é o dono da função. Por isso a reserva também nunca
+--    vale quando a chamada vem de dentro de função SECURITY DEFINER.
 -- ---------------------------------------------------------------------------
-CREATE FUNCTION folha.assertion_account_id() RETURNS uuid
-LANGUAGE sql STABLE SECURITY DEFINER
+CREATE FUNCTION folha.request_context_account_id() RETURNS uuid
+LANGUAGE plpgsql STABLE SECURITY DEFINER
 SET search_path = pg_catalog, gestao_auth
-AS $$
-  SELECT account_id FROM gestao_auth.access_assertion
-   WHERE assertion_id = NULLIF(current_setting('dnex.context_nonce', true), '')::uuid
-     AND consumed_at IS NULL
-     AND revoked_at IS NULL
-     AND expires_at > now()
-   LIMIT 1;
-$$;
+SET row_security = on
+AS $function$
+DECLARE
+  v_nonce_text text;
+  v_txid bigint;
+  v_contexto record;
+BEGIN
+  v_nonce_text := NULLIF(pg_catalog.current_setting('dnex.context_nonce', true), '');
+  IF v_nonce_text IS NULL
+     OR v_nonce_text !~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' THEN
+    RETURN NULL;
+  END IF;
 
-REVOKE ALL ON FUNCTION folha.assertion_account_id() FROM PUBLIC, anon, authenticated, service_role;
+  -- begin_request usa txid_current(): transação sem xid atribuído não tem contexto.
+  v_txid := pg_catalog.txid_current_if_assigned();
+  IF v_txid IS NULL THEN
+    RETURN NULL;
+  END IF;
+
+  SELECT context.account_id, context.legal_entity_id, context.branch_id, context.principal_group
+    INTO v_contexto
+    FROM gestao_auth.request_context AS context
+    JOIN gestao_auth.access_assertion AS assertion
+      ON assertion.assertion_id = context.assertion_id
+   WHERE context.context_nonce = v_nonce_text::uuid
+     AND context.runtime_session_user = session_user
+     AND context.backend_pid = pg_catalog.pg_backend_pid()
+     AND context.transaction_id = v_txid
+     AND context.created_at <= pg_catalog.statement_timestamp()
+     AND context.expires_at > pg_catalog.statement_timestamp()
+     AND assertion.runtime_session_user = context.runtime_session_user
+     AND assertion.subject_id = context.subject_id
+     AND assertion.subject_type = context.subject_type
+     AND assertion.principal_group = context.principal_group
+     AND assertion.account_id = context.account_id
+     AND assertion.legal_entity_id = context.legal_entity_id
+     AND assertion.branch_id = context.branch_id
+     AND assertion.permissions = context.permissions
+     AND assertion.consumed_at = context.created_at
+     AND assertion.revoked_at IS NULL
+     AND assertion.expires_at > pg_catalog.statement_timestamp();
+
+  IF NOT FOUND THEN
+    RETURN NULL;
+  END IF;
+
+  BEGIN
+    PERFORM gestao_auth.assert_authorization_principal_v1(session_user, v_contexto.principal_group);
+  EXCEPTION WHEN insufficient_privilege THEN
+    RETURN NULL;
+  END;
+
+  IF NOT COALESCE(gestao_auth.is_active_scope_v1(
+       v_contexto.account_id, v_contexto.legal_entity_id, v_contexto.branch_id), false) THEN
+    RETURN NULL;
+  END IF;
+
+  RETURN v_contexto.account_id;
+END
+$function$;
 
 CREATE OR REPLACE FUNCTION folha.current_account_id() RETURNS uuid
 LANGUAGE sql STABLE SECURITY INVOKER
 SET search_path = pg_catalog
 AS $$
   SELECT COALESCE(
-    folha.assertion_account_id(),
+    folha.request_context_account_id(),
     CASE WHEN current_user = 'dnex_folha_ci'
+              AND EXISTS (SELECT 1
+                            FROM pg_catalog.pg_namespace n
+                            JOIN pg_catalog.pg_roles r ON r.oid = n.nspowner
+                           WHERE n.nspname = 'dnex_folha_ci_marcador' AND r.rolsuper)
       THEN NULLIF(current_setting('folha.account_id', true), '')::uuid
     END
   );
 $$;
 
-REVOKE ALL ON FUNCTION folha.current_account_id() FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION folha.current_account_id() TO dnex_gestao_folha_worker;
-GRANT EXECUTE ON FUNCTION folha.current_account_id() TO dnex_gestao_data_owner;
-
--- Quem executa current_account_id() precisa executar assertion_account_id(), senão a
--- policy de RLS passaria a falhar com "permission denied". Além dos dois papéis do
--- repositório, replica o EXECUTE para qualquer papel que o tenha recebido fora dele
--- (concessões feitas direto no banco), exceto PUBLIC, anon e authenticated.
-GRANT EXECUTE ON FUNCTION folha.assertion_account_id() TO dnex_gestao_folha_worker;
-GRANT EXECUTE ON FUNCTION folha.assertion_account_id() TO dnex_gestao_data_owner;
-
+-- ACL das duas funções: tira de todo mundo que não seja o dono (inclusive concessões
+-- feitas direto no banco e por default ACL) e concede só aos dois papéis do repositório.
+-- Quem tinha EXECUTE em current_account_id() fora do repositório é avisado, não replicado.
 DO $$
 DECLARE
-  v_papel name;
+  v_sig text;
+  v_papel text;
 BEGIN
-  FOR v_papel IN
-    SELECT r.rolname
-      FROM pg_proc p
-      CROSS JOIN LATERAL aclexplode(p.proacl) a
-      JOIN pg_roles r ON r.oid = a.grantee
-     WHERE p.oid = 'folha.current_account_id()'::regprocedure
-       AND a.privilege_type = 'EXECUTE'
-       AND r.rolname NOT IN ('anon', 'authenticated')
+  FOREACH v_sig IN ARRAY ARRAY['folha.current_account_id()', 'folha.request_context_account_id()']
   LOOP
-    EXECUTE format('GRANT EXECUTE ON FUNCTION folha.assertion_account_id() TO %I', v_papel);
+    FOR v_papel IN
+      SELECT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(r.rolname) END
+        FROM pg_catalog.pg_proc p
+        CROSS JOIN LATERAL aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) a
+        LEFT JOIN pg_catalog.pg_roles r ON r.oid = a.grantee
+       WHERE p.oid = v_sig::regprocedure AND a.grantee <> p.proowner
+       GROUP BY 1
+    LOOP
+      IF v_papel NOT IN ('PUBLIC', 'dnex_gestao_folha_worker', 'dnex_gestao_data_owner') THEN
+        RAISE WARNING '0024: % perdeu EXECUTE em % (concessão de fora do repositório)', v_papel, v_sig;
+      END IF;
+      EXECUTE format('REVOKE ALL ON FUNCTION %s FROM %s', v_sig, v_papel);
+    END LOOP;
+    EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC, anon, authenticated, service_role', v_sig);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO dnex_gestao_folha_worker, dnex_gestao_data_owner', v_sig);
   END LOOP;
 END
 $$;
@@ -181,9 +334,10 @@ CREATE TABLE folha.establishment (
   CONSTRAINT establishment_employer_fk FOREIGN KEY (account_id, employer_id)
     REFERENCES folha.employer (account_id, employer_id),
   UNIQUE (account_id, tipo_inscricao, inscricao),
-  UNIQUE (account_id, establishment_id)
+  UNIQUE (account_id, establishment_id),
+  -- alvo de quem precisa provar "este estabelecimento é deste empregador"
+  UNIQUE (account_id, employer_id, establishment_id)
 );
-CREATE INDEX idx_establishment_employer ON folha.establishment (account_id, employer_id);
 
 -- 3.3.1 FAP do estabelecimento por vigência (tabela filha)
 CREATE TABLE folha.establishment_fap (
@@ -210,19 +364,23 @@ CREATE TABLE folha.establishment_fap (
 );
 
 -- 3.4 Nível 4 — lotação tributária (identidade)
+--     employer_id é repetido aqui (e conferido contra o estabelecimento) para que o
+--     rateio do contrato possa exigir "lotação do mesmo empregador do contrato".
 CREATE TABLE folha.tax_allocation (
   allocation_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   account_id uuid NOT NULL,
+  employer_id uuid NOT NULL,
   establishment_id uuid NOT NULL,
   codigo_lotacao text NOT NULL CHECK (btrim(codigo_lotacao) <> ''),
   tipo_lotacao text NOT NULL,      -- código do tipo de lotação do eSocial; domínio a validar na fonte
   descricao text,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
-  CONSTRAINT tax_allocation_establishment_fk FOREIGN KEY (account_id, establishment_id)
-    REFERENCES folha.establishment (account_id, establishment_id),
+  CONSTRAINT tax_allocation_establishment_fk FOREIGN KEY (account_id, employer_id, establishment_id)
+    REFERENCES folha.establishment (account_id, employer_id, establishment_id),
   UNIQUE (account_id, establishment_id, codigo_lotacao),
-  UNIQUE (account_id, allocation_id)
+  UNIQUE (account_id, allocation_id),
+  UNIQUE (account_id, employer_id, allocation_id)
 );
 
 -- 3.4.1 Enquadramento da lotação por vigência (tabela filha)
@@ -252,6 +410,8 @@ CREATE TABLE folha.tax_allocation_detail (
 
 -- ---------------------------------------------------------------------------
 -- 4. Vínculo das tabelas existentes com o empregador (colunas anuláveis nesta migration)
+--    Estabelecimento só com empregador, e sempre do mesmo empregador (chave composta de
+--    três colunas; o CHECK fecha a brecha do MATCH SIMPLE quando employer_id é nulo).
 -- ---------------------------------------------------------------------------
 ALTER TABLE folha.employee
   ADD COLUMN employer_id uuid,
@@ -265,23 +425,27 @@ ALTER TABLE folha.employment_contract
   ADD COLUMN establishment_id uuid,
   ADD CONSTRAINT contract_employer_fk FOREIGN KEY (account_id, employer_id)
     REFERENCES folha.employer (account_id, employer_id),
-  ADD CONSTRAINT contract_establishment_fk FOREIGN KEY (account_id, establishment_id)
-    REFERENCES folha.establishment (account_id, establishment_id);
+  ADD CONSTRAINT contract_establishment_fk FOREIGN KEY (account_id, employer_id, establishment_id)
+    REFERENCES folha.establishment (account_id, employer_id, establishment_id),
+  ADD CONSTRAINT contract_establishment_exige_employer
+    CHECK (establishment_id IS NULL OR employer_id IS NOT NULL);
 CREATE INDEX idx_contract_employer ON folha.employment_contract (account_id, employer_id)
   WHERE employer_id IS NOT NULL;
 CREATE INDEX idx_contract_establishment ON folha.employment_contract (account_id, establishment_id)
   WHERE establishment_id IS NOT NULL;
--- alvo da chave composta do rateio (contract_id já é único; o par também é)
-CREATE UNIQUE INDEX employment_contract_account_contract_key
-  ON folha.employment_contract (account_id, contract_id);
+-- alvo da chave composta do rateio: prova que o contrato é daquele empregador
+CREATE UNIQUE INDEX employment_contract_account_employer_contract_key
+  ON folha.employment_contract (account_id, employer_id, contract_id);
 
 ALTER TABLE folha.payroll_run
   ADD COLUMN employer_id uuid,
   ADD COLUMN establishment_id uuid,
   ADD CONSTRAINT run_employer_fk FOREIGN KEY (account_id, employer_id)
     REFERENCES folha.employer (account_id, employer_id),
-  ADD CONSTRAINT run_establishment_fk FOREIGN KEY (account_id, establishment_id)
-    REFERENCES folha.establishment (account_id, establishment_id);
+  ADD CONSTRAINT run_establishment_fk FOREIGN KEY (account_id, employer_id, establishment_id)
+    REFERENCES folha.establishment (account_id, employer_id, establishment_id),
+  ADD CONSTRAINT run_establishment_exige_employer
+    CHECK (establishment_id IS NULL OR employer_id IS NOT NULL);
 CREATE INDEX idx_run_employer ON folha.payroll_run (account_id, employer_id)
   WHERE employer_id IS NOT NULL;
 CREATE INDEX idx_run_establishment ON folha.payroll_run (account_id, establishment_id)
@@ -289,10 +453,16 @@ CREATE INDEX idx_run_establishment ON folha.payroll_run (account_id, establishme
 
 -- ---------------------------------------------------------------------------
 -- 5. Rateio do contrato por lotação (percentual somando 100 em cada dia coberto)
+--    Contrato e lotação precisam ser do MESMO empregador (employer_id entra nas duas
+--    chaves estrangeiras). Estabelecimentos diferentes do mesmo empregador são aceitos:
+--    o S-1200 informa a remuneração por estabelecimento e lotação (ideEstabLot), e um
+--    contrato pode ser rateado entre lotações de mais de um estabelecimento.
+--    Consequência: só há rateio para contrato com empregador preenchido.
 -- ---------------------------------------------------------------------------
 CREATE TABLE folha.contract_tax_allocation (
   allocation_entry_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   account_id uuid NOT NULL,
+  employer_id uuid NOT NULL,
   contract_id uuid NOT NULL,
   allocation_id uuid NOT NULL,
   percentual numeric(5,2) NOT NULL CHECK (percentual > 0 AND percentual <= 100),
@@ -300,10 +470,10 @@ CREATE TABLE folha.contract_tax_allocation (
   vigencia_fim date,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
-  CONSTRAINT contract_tax_allocation_contract_fk FOREIGN KEY (account_id, contract_id)
-    REFERENCES folha.employment_contract (account_id, contract_id),
-  CONSTRAINT contract_tax_allocation_allocation_fk FOREIGN KEY (account_id, allocation_id)
-    REFERENCES folha.tax_allocation (account_id, allocation_id),
+  CONSTRAINT contract_tax_allocation_contract_fk FOREIGN KEY (account_id, employer_id, contract_id)
+    REFERENCES folha.employment_contract (account_id, employer_id, contract_id),
+  CONSTRAINT contract_tax_allocation_allocation_fk FOREIGN KEY (account_id, employer_id, allocation_id)
+    REFERENCES folha.tax_allocation (account_id, employer_id, allocation_id),
   CONSTRAINT contract_tax_allocation_vigencia_valida
     CHECK (vigencia_fim IS NULL OR vigencia_fim >= vigencia_inicio),
   -- a mesma lotação não aparece duas vezes no mesmo dia para o mesmo contrato;
@@ -322,40 +492,61 @@ CREATE INDEX idx_contract_tax_allocation_allocation
 -- tem alguma linha de rateio vigente, a soma dos percentuais vigentes é exatamente 100.
 -- A soma só muda nos inícios de vigência e no dia seguinte a cada fim; basta conferir
 -- esses dias. Dia sem nenhuma linha vigente é permitido (contrato ainda sem rateio).
+--
+-- A conferência não depende de quem grava nem do contexto da sessão:
+--   * SECURITY DEFINER com row_security = off: lê todas as linhas do contrato mesmo que a
+--     sessão tenha perdido ou trocado o contexto antes do COMMIT (com RLS, a soma viria
+--     nula e passaria). Se o dono não ignorar RLS, a leitura falha em vez de vir vazia.
+--   * Filtro explícito por account_id e contract_id.
+--   * Serialização por contrato: antes de somar, grava a linha do contrato (updated_at).
+--     Duas transações que rateiam o mesmo contrato ficam em fila; a segunda, ao somar, já
+--     enxerga as linhas confirmadas da primeira (READ COMMITTED) ou falha com erro de
+--     serialização (REPEATABLE READ e SERIALIZABLE). Sem isso, cada uma veria só as
+--     próprias linhas e as duas passariam com 100.
 CREATE FUNCTION folha.validar_rateio_contrato() RETURNS trigger
-LANGUAGE plpgsql
+LANGUAGE plpgsql SECURITY DEFINER
 SET search_path = pg_catalog
+SET row_security = off
 AS $$
 DECLARE
+  v_contas uuid[];
   v_contratos uuid[];
-  v_contrato uuid;
+  i integer;
   v_dia date;
   v_soma numeric;
 BEGIN
   IF TG_OP = 'INSERT' THEN
+    v_contas := ARRAY[NEW.account_id];
     v_contratos := ARRAY[NEW.contract_id];
   ELSIF TG_OP = 'DELETE' THEN
+    v_contas := ARRAY[OLD.account_id];
     v_contratos := ARRAY[OLD.contract_id];
   ELSE
+    v_contas := ARRAY[NEW.account_id, OLD.account_id];
     v_contratos := ARRAY[NEW.contract_id, OLD.contract_id];
   END IF;
 
-  FOREACH v_contrato IN ARRAY v_contratos
+  FOR i IN 1 .. array_length(v_contratos, 1)
   LOOP
+    UPDATE folha.employment_contract c
+       SET updated_at = now()
+     WHERE c.account_id = v_contas[i] AND c.contract_id = v_contratos[i];
+
     SELECT d.dia, s.soma INTO v_dia, v_soma
       FROM (
         SELECT c.vigencia_inicio AS dia
           FROM folha.contract_tax_allocation c
-         WHERE c.contract_id = v_contrato
+         WHERE c.account_id = v_contas[i] AND c.contract_id = v_contratos[i]
         UNION
         SELECT c.vigencia_fim + 1
           FROM folha.contract_tax_allocation c
-         WHERE c.contract_id = v_contrato AND c.vigencia_fim IS NOT NULL
+         WHERE c.account_id = v_contas[i] AND c.contract_id = v_contratos[i]
+           AND c.vigencia_fim IS NOT NULL
       ) d
       CROSS JOIN LATERAL (
         SELECT sum(c.percentual) AS soma
           FROM folha.contract_tax_allocation c
-         WHERE c.contract_id = v_contrato
+         WHERE c.account_id = v_contas[i] AND c.contract_id = v_contratos[i]
            AND c.vigencia_inicio <= d.dia
            AND (c.vigencia_fim IS NULL OR c.vigencia_fim >= d.dia)
       ) s
@@ -365,7 +556,7 @@ BEGIN
 
     IF FOUND THEN
       RAISE EXCEPTION 'Rateio do contrato % deve somar 100 em %: soma atual %',
-        v_contrato, v_dia, v_soma
+        v_contratos[i], v_dia, v_soma
         USING ERRCODE = 'check_violation';
     END IF;
   END LOOP;
@@ -403,13 +594,19 @@ ALTER TABLE folha.payroll_parameter
   );
 
 -- ---------------------------------------------------------------------------
--- 7. RLS (ENABLE + FORCE), policy por conta e ACL — REVOKE ALL antes de qualquer GRANT.
+-- 7. RLS (ENABLE + FORCE), policy por conta e ACL.
 --    Mesmo critério da 0014: worker lê e grava (sem DELETE); data_owner só lê.
 --    payroll_parameter não entra: RLS, policies e ACL dela são os da 0023.
+--    A policy usa (SELECT folha.current_account_id()) para a conta ser resolvida uma vez
+--    por comando, e não a cada linha.
+--    ACL: antes de conceder, tira TUDO de TODO papel que não seja o dono — não só de uma
+--    lista fixa. Um default ACL do schema (ALTER DEFAULT PRIVILEGES) pode ter dado
+--    privilégio a qualquer papel no momento do CREATE TABLE.
 -- ---------------------------------------------------------------------------
 DO $$
 DECLARE
   v_tabela text;
+  v_papel text;
 BEGIN
   FOREACH v_tabela IN ARRAY ARRAY[
     'employer', 'employer_regime', 'establishment', 'establishment_fap',
@@ -420,15 +617,38 @@ BEGIN
     EXECUTE format('ALTER TABLE folha.%I FORCE ROW LEVEL SECURITY', v_tabela);
     EXECUTE format(
       'CREATE POLICY %I ON folha.%I
-         USING (account_id = folha.current_account_id())
-         WITH CHECK (account_id = folha.current_account_id())',
+         USING (account_id = (SELECT folha.current_account_id()))
+         WITH CHECK (account_id = (SELECT folha.current_account_id()))',
       v_tabela || '_isolamento', v_tabela);
+
+    FOR v_papel IN
+      SELECT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(r.rolname) END
+        FROM pg_catalog.pg_class c
+        CROSS JOIN LATERAL aclexplode(COALESCE(c.relacl, acldefault('r', c.relowner))) a
+        LEFT JOIN pg_catalog.pg_roles r ON r.oid = a.grantee
+       WHERE c.oid = format('folha.%I', v_tabela)::regclass AND a.grantee <> c.relowner
+       GROUP BY 1
+    LOOP
+      EXECUTE format('REVOKE ALL ON folha.%I FROM %s', v_tabela, v_papel);
+    END LOOP;
     EXECUTE format(
       'REVOKE ALL ON folha.%I FROM PUBLIC, anon, authenticated, service_role', v_tabela);
     EXECUTE format(
       'GRANT SELECT, INSERT, UPDATE ON folha.%I TO dnex_gestao_folha_worker', v_tabela);
     EXECUTE format(
       'GRANT SELECT ON folha.%I TO dnex_gestao_data_owner', v_tabela);
+  END LOOP;
+
+  -- A função do trigger não é chamada por ninguém diretamente: nenhum EXECUTE além do dono.
+  FOR v_papel IN
+    SELECT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(r.rolname) END
+      FROM pg_catalog.pg_proc p
+      CROSS JOIN LATERAL aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) a
+      LEFT JOIN pg_catalog.pg_roles r ON r.oid = a.grantee
+     WHERE p.oid = 'folha.validar_rateio_contrato()'::regprocedure AND a.grantee <> p.proowner
+     GROUP BY 1
+  LOOP
+    EXECUTE format('REVOKE ALL ON FUNCTION folha.validar_rateio_contrato() FROM %s', v_papel);
   END LOOP;
 END
 $$;
