@@ -537,13 +537,17 @@ SELECT is(
 SELECT is(
   (SELECT incidencia_inss FROM folha.earning_deduction_code WHERE is_global AND codigo = 'DECIMO_TERCEIRO_1A'),
   false, 'Rubricas: 1ª parcela do 13º sem INSS no ato');
+-- Lista do catálogo inteiro. Mudou com a migration 0025: irrf_redutor_coef_a e irrf_redutor_coef_b
+-- passaram a 'validado' (o parecer de INSS/FGTS conferiu os coeficientes na Lei 15.270/2025) e
+-- entraram inss_arredondamento_metodo e terceiros_incide_contribuinte_individual (a_validar).
 SELECT set_eq(
   $$SELECT chave FROM folha.payroll_parameter WHERE status_validacao = 'a_validar'$$,
   ARRAY['divisor_variaveis_quitacao', 'divisor_variaveis_ajuste', 'ferias_fracionamento_max_periodos',
         'ferias_fracionamento_minimo_1', 'ferias_fracionamento_minimo_2', 'irrf_abono_pecuniario_incide',
-        'irrf_dobra_ferias_incide', 'irrf_redutor_referencia_bruto', 'irrf_redutor_coef_a', 'irrf_redutor_coef_b',
+        'irrf_dobra_ferias_incide', 'irrf_redutor_referencia_bruto',
         'aviso_previo_dias_por_ano', 'prazo_pagamento_rescisao_dias', 'divisor_saldo_salario',
-        'inss_aviso_indenizado_incide', 'inss_projecao_aviso_incide'],
+        'inss_aviso_indenizado_incide', 'inss_projecao_aviso_incide',
+        'inss_arredondamento_metodo', 'terceiros_incide_contribuinte_individual'],
   'Parâmetros: o que os pareceres marcam A VALIDAR NA FONTE está como a_validar');
 SELECT throws_ok($$SELECT folha.get_param('parametro_inexistente', '2026-01-01')$$,
   'P0001', NULL, 'get_param: parâmetro ausente levanta exceção (sem valor de reserva)');

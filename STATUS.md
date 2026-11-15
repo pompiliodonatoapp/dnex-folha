@@ -1,5 +1,61 @@
 # DNEX Folha — Status do Repositório
 
+## Frente 15/11/2026 (fatia 3) — Migration 0025: motor mensal
+
+Branch `fix/folha-motor-mensal-20261115`, PR em rascunho. Nada aplicado em produção nem no Supabase.
+**Não aplicar em produção** sem a dependência do dnex-gestao da 0024 e sem decidir o que está `a_validar`.
+
+### O que entrou
+
+- **Migration 0025** (`migrations/supabase/0025_folha_motor_mensal.supabase.sql`, reversão em `.down.sql`):
+  - `calc_inss`: arredondamento por parâmetro (`inss_arredondamento_metodo`, `a_validar`) e erro se o teto diferir do fim da última faixa. `calc_inss_segurado(base, categoria, competência)`: tabela progressiva para CLT e aprendiz; pró-labore (categoria nova `contribuinte_individual`) com 11% até o teto; estagiário e PJ sem INSS.
+  - `calc_irrf(rendimento, INSS retido, dependentes, data de pagamento, outras deduções)`: redução da Lei 15.270/2025 pelo rendimento tributável bruto, com limites, teto e coeficientes em `payroll_parameter`; maior entre deduções legais e desconto simplificado; tabela escolhida pela data de pagamento. `calc_irrf_separado` (0023) usa a mesma apuração (`irrf_apurar`).
+  - `calc_fgts`: 8% CLT, 2% aprendiz, zero para estagiário, PJ e contribuinte individual; sem a "multa" de 40% sobre o depósito do mês.
+  - `calc_salario_familia`: cota e limite por vigência (2024, 2025, 2026), faixa única.
+  - `calc_encargos_patronais`: por lotação do rateio do contrato, com o regime do empregador vigente: regra geral, CPRB (fator da transição, sem o 13º), Simples com CPP no DAS e fora do DAS, pró-labore sem RAT. Falta de empregador, regime, lotação, enquadramento, FAP ou alíquota levanta exceção; cadastro incoerente também.
+  - `run_payroll_employee(folha, contrato, dependentes, filhos)`: conta da sessão, folha travada e em `draft`/`calculating`, um resultado por contrato (índice único), encargos gravados (antes nulos), pendências na memória de cálculo. PJ é recusado.
+  - Cadastro: `payroll_run.data_pagamento`, `tax_allocation_detail.aliquota_terceiros`, `folha.request_context_config`.
+  - Tabelas de 2024 e 2025 (INSS, salário mínimo, IRRF de fev/2024 em diante) com o ato no JSON; a tabela do IRRF de mai/2023 a jan/2024 não entrou (ato a validar).
+  - Segurança: 12 policies das 0014/0018 recriadas com `(SELECT folha.current_account_id())`; `request_context_account_id()` confere o grupo do principal contra `request_context_config` (hoje NULL = sem restrição; o grupo da Folha não existe no gestao e não foi inventado); ACL das 11 funções revogada de todos e concedida só a worker e data_owner (`run_payroll_employee` só ao worker; auxiliares a ninguém).
+- **Removidos:** `tests/folha/run_eventos_vida_tests.py` e o `.pyc` versionado.
+- **Assinaturas removidas:** `calc_irrf(numeric, integer, boolean, date)`, a coluna `fgts_multa_rescisoria` de `calc_fgts` e `run_payroll_employee(uuid, uuid)` (a nova aceita os mesmos dois argumentos). Consumidores fora deste repositório não foram verificados.
+
+### Verificado em execução (PostgreSQL 17 + pgTAP em Docker local, banco recriado, roteiro de `tests/ci/replay.sh`)
+
+- 871 asserções aprovadas: 0014: 19; 0022: 25; 0023: 371; 0024: 165; **0025: 207**; dashboard: 12; eventos_vida: 47; golden: 25; mais a corrida do rateio.
+- `0025_motor_mensal_dourados`: CD-01 a CD-15 do parecer em centavos, variante truncada do INSS, negativos (categoria não sujeita, falta de empregador/regime/lotação/enquadramento/FAP/terceiros, cadastro incoerente, parâmetro sem vigência, data anterior às tabelas, outra conta, folha fechada), policies, configuração do contexto e ACL.
+- `up -> down -> up` da 0025 com a suíte inteira verde depois. O CI não executa o `.down.sql`.
+- Revisão independente somente leitura (aritmética e SQL): sem divergência de centavo; achados corrigidos ou listados abaixo.
+
+### `a_validar` (parâmetro ou pendência devolvida)
+
+`inss_arredondamento_metodo`; `terceiros_incide_contribuinte_individual`; `irrf_redutor_referencia_bruto` (só IRRF em separado); pendências `estagio_nao_incidencia_lei_11788`, `inss_ci_retencao_11_em_optante_do_simples`, `fap_em_optante_do_simples_anexo_iv`, `cprb_empresa_integralmente_desonerada`, `irrf_simplificado_pela_fonte_pagadora_ato_rfb`, `salario_familia_documentos_de_elegibilidade`, `salario_familia_divisor_da_fracao_de_dias`. Passaram a `validado` (conferidos no parecer): `irrf_redutor_coef_a` e `irrf_redutor_coef_b`.
+
+### Decisões e divergências (detalhe em `scratch/DIVERGENCIAS-PARECER-FATIA3.md`, fora do git)
+
+1. Parâmetro `a_validar` é usado e o resultado é gravado com a pendência na memória de cálculo; o parecer propõe bloquear. Decisão do dono.
+2. O teto de 312,89 da redução passou a valer também no IRRF em separado: rendimento entre cerca de 4.890,00 e 5.000,00 pode reter até R$ 23,78 (antes zero). Depende de o desconto simplificado valer em separado: a validar.
+3. Encargos arredondados por contrato e lotação, não sobre a soma das bases da lotação.
+4. CD-15 "parâmetro em rascunho": o catálogo não tem esse estado; conferido como parâmetro sem vigência.
+
+### Pendências
+
+- Base ainda é o salário contratual do mês cheio: rubricas, faltas, proporcionalidade, 13º mensal, múltiplos vínculos, pensão e previdência complementar ficam para a fatia 4. Dependentes e filhos entram por argumento.
+- `build_esocial_s1200`/`s2200` (0020) tratam contribuinte individual como categoria 101 e somam o salário-família em `vr_salario`.
+- Simples concomitante, MEI, imune, pessoa física e órgão público: exceção (sem regra). Tabela de terceiros por FPAS, RAT por CNAE, dispensa de retenção de valor mínimo do IRRF: não implementados.
+- Vigências de regime, rateio, FAP e lotação são lidas na data da competência; FAP sem controle anual.
+- JSON de FGTS e do redutor na 0015 ficou sem leitor (o motor lê `payroll_parameter`).
+- Tabelas de INSS e IRRF de 2026 (0015) seguem com vigência aberta; salário-família de 2026 fecha em 31/12/2026.
+- Documentação funcional (vault `DNEX-Documentacao`): não atualizada (vault inacessível neste host). Pendência documental aberta.
+
+### Não verificado
+
+- Produção e Supabase (estado real de `tax_table_version` e `payroll_parameter`, funções órfãs do E-17, quem chama as assinaturas removidas no Hub e em funções de borda).
+- Fontes oficiais: os valores foram conferidos contra o parecer, não contra os atos.
+- CI do GitHub para este PR (ver o resultado no PR).
+
+---
+
 ## Frente 15/11/2026 (noite) — Migration 0024: empregador em quatro níveis e conta da sessão
 
 Branch `feat/folha-empregador-20261115`, PR 3 em rascunho. Nada aplicado em produção.
@@ -116,10 +172,8 @@ Fora da tabela, ainda sem validação:
 - **Consumidores das assinaturas antigas não verificados** (dnex-hub, funções de borda, outros repositórios): quem
   chama `calc_ferias(uuid,date)`, `calc_13o(uuid,date,integer)` ou `calc_rescisao(uuid,date,text)` quebra ao aplicar
   a 0023. Conferir antes de aplicar em produção.
-- `tests/folha/run_eventos_vida_tests.py` ficou obsoleto: usa as assinaturas antigas e grava dados de teste direto
-  no projeto Supabase. Não foi executado nem alterado; decidir se sai do repositório.
-- `calc_irrf` (folha mensal) segue com o critério de base líquida e as constantes fixas (V6, C4); a folha mensal e
-  os eventos de vida usam critérios diferentes do redutor até a validação.
+- O script Python de testes dos eventos de vida, obsoleto, foi removido na fatia 3 (migration 0025).
+- `calc_irrf` (folha mensal): corrigido na fatia 3 (migration 0025); mensal e separado usam a mesma apuração.
 - Parâmetros e tabelas só existem a partir de 01/01/2026: cálculo com data anterior levanta erro.
 - IRRF das férias usa a data de início do gozo como competência (o pagamento ocorre antes; regime de caixa a tratar).
 - Projeção do aviso que atravessa o ano: o 13º soma os avos dos dois anos, com pendência (falta separar por ano).

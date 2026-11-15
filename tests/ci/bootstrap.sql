@@ -1,4 +1,4 @@
--- DNEX Folha — Bootstrap mínimo para replay das migrations 0014..0024 em CI.
+-- DNEX Folha — Bootstrap mínimo para replay das migrations 0014..0025 em CI.
 -- Cria SOMENTE objetos externos ao repositório que as migrations referenciam.
 -- Cada stub tem comentário com migration:linha que o exige.
 -- NÃO usar em produção; apenas para testes de replay do zero.

@@ -1,180 +1,109 @@
--- DNEX Folha — Golden Cases de Cálculo (INSS, IRRF, FGTS)
--- Valida motor PL/pgSQL contra valores esperados das tabelas vigentes 2026.
--- Executar após migrations 0014–0016 aplicadas.
--- Rollback: ROLLBACK; (não modifica dados persistentes)
+-- DNEX Folha — conferência direta de calc_inss, calc_irrf e calc_fgts (tabelas de 2026).
+-- Reescrito com a migration 0025: calc_irrf recebe o rendimento tributável bruto, o INSS
+-- retido, os dependentes e a DATA DE PAGAMENTO (a assinatura antiga recebia a base já líquida
+-- de INSS e consagrava o erro E-16 do parecer); calc_fgts perdeu a coluna da "multa" de 40%
+-- sobre o depósito do mês (E-09).
+-- Os valores abaixo são DERIVADOS das tabelas e regras do parecer de INSS/FGTS de 15/11/2026,
+-- com a conta no comentário; os casos dourados do parecer (CD-01 a CD-15) ficam em
+-- 0025_motor_mensal_dourados.pgtap.sql.
+-- Executar após as migrations 0014–0025. Nada é persistido (ROLLBACK no final).
 BEGIN;
-SELECT plan(21);
+SELECT plan(25);
 
--- ---------------------------------------------------------------------------
--- Setup: garantir tabelas fiscais existem
--- ---------------------------------------------------------------------------
-SELECT ok(
-  (SELECT count(*) >= 5 FROM folha.tax_table_version),
-  'Tabelas fiscais seed carregadas (mínimo 5 registros)'
+SELECT is(
+  (SELECT count(*) FROM folha.tax_table_version WHERE tipo = 'inss'),
+  3::bigint,
+  'Tabelas do INSS: 2024, 2025 e 2026 carregadas'
 );
 
 -- ---------------------------------------------------------------------------
--- INSS Progressivo — 5 golden cases
+-- INSS progressivo (tabela de 2026; soma exata das faixas, arredondada no total)
+-- Provisório: o critério de centavos é o parâmetro inss_arredondamento_metodo (a_validar).
 -- ---------------------------------------------------------------------------
-
--- Caso 1: Salário mínimo R$ 1.621,00 → INSS R$ 121,58 (7,5%)
-SELECT is(
-  (SELECT valor_inss FROM folha.calc_inss(1621.00, '2026-10-01')),
-  121.58::numeric,
-  'INSS salário mínimo R$ 1.621,00 = R$ 121,58'
-);
-
--- Valores esperados corrigidos em 15/11/2026 pelo parecer de DP (tabela progressiva de 2026 do seed 0015).
--- O caso 2 era pendencia conhecida (calc_inss perdia 1 centavo de base por faixa e devolvia 200,68);
--- a migration 0023 corrigiu as faixas e o caso passou a ser assercao normal.
--- Caso 2: R$ 2.500,00 → INSS R$ 200,69 (faixa 2 parcial)
-SELECT is(
-  (SELECT valor_inss FROM folha.calc_inss(2500.00, '2026-10-01')),
-  200.69::numeric,
-  'INSS R$ 2.500,00 = R$ 200,69'
-);
-
--- Caso 3: R$ 3.500,00 → INSS R$ 308,60 (faixa 3 parcial)
-SELECT is(
-  (SELECT valor_inss FROM folha.calc_inss(3500.00, '2026-10-01')),
-  308.60::numeric,
-  'INSS R$ 3.500,00 = R$ 308,60'
-);
-
--- Caso 4: Teto R$ 8.475,55 → INSS R$ 988,09
-SELECT is(
-  (SELECT valor_inss FROM folha.calc_inss(8475.55, '2026-10-01')),
-  988.09::numeric,
-  'INSS teto R$ 8.475,55 = R$ 988,09'
-);
-
--- Caso 5: Acima do teto R$ 10.000,00 → INSS limitado ao teto R$ 988,09
-SELECT is(
-  (SELECT valor_inss FROM folha.calc_inss(10000.00, '2026-10-01')),
-  988.09::numeric,
-  'INSS acima do teto R$ 10.000,00 = R$ 988,09 (limitado)'
-);
+-- 1.621,00 x 7,5% = 121,575
+SELECT is((SELECT valor_inss FROM folha.calc_inss(1621.00, '2026-10-01')), 121.58::numeric,
+  'INSS salário mínimo 1.621,00 = 121,58');
+-- 121,575 + 879,00 x 9% (79,11) = 200,685
+SELECT is((SELECT valor_inss FROM folha.calc_inss(2500.00, '2026-10-01')), 200.69::numeric,
+  'INSS 2.500,00 = 200,69');
+-- 121,575 + 115,3656 + 597,16 x 12% (71,6592) = 308,5998
+SELECT is((SELECT valor_inss FROM folha.calc_inss(3500.00, '2026-10-01')), 308.60::numeric,
+  'INSS 3.500,00 = 308,60');
+-- 121,575 + 115,3656 + 174,1716 + 4.121,28 x 14% (576,9792) = 988,0914
+SELECT is((SELECT valor_inss FROM folha.calc_inss(8475.55, '2026-10-01')), 988.09::numeric,
+  'INSS no teto 8.475,55 = 988,09');
+SELECT is((SELECT valor_inss FROM folha.calc_inss(10000.00, '2026-10-01')), 988.09::numeric,
+  'INSS acima do teto (10.000,00) = 988,09');
 
 -- ---------------------------------------------------------------------------
--- IRRF com Redutor Lei 15.270/2025 — 5 golden cases
+-- IRRF mensal: calc_irrf(rendimento, INSS retido, dependentes, data de pagamento)
 -- ---------------------------------------------------------------------------
-
--- Caso 6: Base R$ 2.400,00 → IRRF R$ 0,00 (isento pela tabela + Lei 15.270/2025)
-SELECT is(
-  (SELECT valor_irrf FROM folha.calc_irrf(2400.00, 0, false, '2026-10-01')),
-  0.00::numeric,
-  'IRRF base R$ 2.400,00 = R$ 0,00 (isento tabela + Lei 15.270/2025 isenção até R$ 5.000)'
-);
-
--- Caso 7: Base R$ 2.800,00 sem dependentes → IRRF R$ 0,00 (Lei 15.270/2025 isenção até R$ 5.000)
-SELECT is(
-  (SELECT valor_irrf FROM folha.calc_irrf(2800.00, 0, false, '2026-10-01')),
-  0.00::numeric,
-  'IRRF base R$ 2.800,00 = R$ 0,00 (Lei 15.270/2025 isenção efetiva até R$ 5.000)'
-);
-
--- Caso 8: Base R$ 3.500,00 com 2 dependentes → IRRF R$ 0,00 (Lei 15.270/2025 isenção até R$ 5.000)
-SELECT is(
-  (SELECT valor_irrf FROM folha.calc_irrf(3500.00, 2, false, '2026-10-01')),
-  0.00::numeric,
-  'IRRF base R$ 3.500,00 com 2 dependentes = R$ 0,00 (Lei 15.270/2025 isenção até R$ 5.000)'
-);
-
--- Caso 9: Desconto simplificado R$ 3.000,00 → IRRF R$ 0,00 (base efetiva R$ 2.392,80 < limite isenção)
-SELECT is(
-  (SELECT valor_irrf FROM folha.calc_irrf(3000.00, 0, true, '2026-10-01')),
-  0.00::numeric,
-  'IRRF R$ 3.000,00 com desconto simplificado = R$ 0,00 (base efetiva R$ 2.392,80 isenta)'
-);
-
--- Caso 10: Redutor Lei 15.270 aplicado (base R$ 4.500 ≤ R$ 5.000 → isenção total)
--- Redutor calculado: 978,62 - (0,133145 × 4500) = 379,47
--- IRRF bruto pela tabela: R$ 337,01 → redutor = bruto (isenção total) → final = 0
-SELECT is(
-  (SELECT valor_irrf FROM folha.calc_irrf(4500.00, 0, false, '2026-10-01')),
-  0.00::numeric,
-  'IRRF base R$ 4.500,00 = R$ 0,00 (Lei 15.270/2025 isenção total até R$ 5.000)'
-);
-SELECT is(
-  (SELECT redutor_lei_15270 FROM folha.calc_irrf(4500.00, 0, false, '2026-10-01')),
-  337.01::numeric,
-  'Redutor Lei 15.270/2025 para base R$ 4.500,00 = R$ 337,01 (igual ao bruto, isenção total)'
-);
-
--- Caso 10b: Base R$ 6.000,00 → IRRF tributado com redução gradual
--- Faixa 22,5%: bruto = 6000*0.225 - 675.49 = 674,51
--- Redutor: 978,62 - (0.133145 * 6000) = 179,75
--- Final: 674,51 - 179,75 = 494,76
-SELECT is(
-  (SELECT valor_irrf FROM folha.calc_irrf(6000.00, 0, false, '2026-10-01')),
-  561.52::numeric,
-  'IRRF base R$ 6.000,00 = R$ 561,52 (redução gradual Lei 15.270/2025 aplicada)'
-);
-
--- Caso 10c: Base R$ 7.500,00 → acima do limite de redução (R$ 7.350)
--- Faixa 27,5%: bruto = 7500*0.275 - 908.73 = 1.153,77
--- Redutor: 0 (acima de R$ 7.350)
--- Final: 1.153,77
-SELECT is(
-  (SELECT valor_irrf FROM folha.calc_irrf(7500.00, 0, false, '2026-10-01')),
-  1153.77::numeric,
-  'IRRF base R$ 7.500,00 = R$ 1.153,77 (sem redutor, acima do limite R$ 7.350)'
-);
+-- 3.000,00: INSS 248,60 < 607,20 -> simplificado; base 2.392,80 -> isento
+SELECT is((SELECT valor_irrf FROM folha.calc_irrf(3000.00, 248.60, 0, '2026-10-31')), 0.00::numeric,
+  'IRRF 3.000,00 = 0,00');
+SELECT is((SELECT desconto_aplicado FROM folha.calc_irrf(3000.00, 248.60, 0, '2026-10-31')), 'simplificado',
+  'IRRF 3.000,00: desconto simplificado é mais favorável que o INSS');
+-- 6.000,00: INSS 641,51 > 607,20; base 5.358,49; 27,5%: 1.473,58475 - 908,73 = 564,85475;
+-- redução 978,62 - 0,133145 x 6.000,00 = 179,75; imposto 385,10475
+SELECT is((SELECT valor_irrf FROM folha.calc_irrf(6000.00, 641.51, 0, '2026-10-31')), 385.10::numeric,
+  'IRRF 6.000,00 = 385,10 (redução aferida pelo rendimento bruto)');
+-- 7.500,00: INSS 851,51; base 6.648,49; 27,5%: 1.828,33475 - 908,73 = 919,60475; acima de 7.350,00, sem redução
+SELECT is((SELECT valor_irrf FROM folha.calc_irrf(7500.00, 851.51, 0, '2026-10-31')), 919.60::numeric,
+  'IRRF 7.500,00 = 919,60 (sem redução acima de 7.350,00)');
+-- 4.500,00: INSS 431,51 < 607,20 -> simplificado; base 3.892,80; 22,5%: 875,88 - 675,49 = 200,39;
+-- rendimento até 5.000,00: redução 200,39 (limitada a 312,89) -> zero
+SELECT is((SELECT valor_irrf FROM folha.calc_irrf(4500.00, 431.51, 0, '2026-10-31')), 0.00::numeric,
+  'IRRF 4.500,00 = 0,00');
+SELECT is((SELECT redutor_lei_15270 FROM folha.calc_irrf(4500.00, 431.51, 0, '2026-10-31')), 200.39::numeric,
+  'IRRF 4.500,00: redução da Lei 15.270/2025 = 200,39 (o imposto da tabela)');
+-- 3.500,00 com 2 dependentes: legais 308,60 + 2 x 189,59 = 687,78 > 607,20; base 2.812,22;
+-- 7,5%: 210,9165 - 182,16 = 28,7565; rendimento até 5.000,00 -> zero
+SELECT is((SELECT valor_irrf FROM folha.calc_irrf(3500.00, 308.60, 2, '2026-10-31')), 0.00::numeric,
+  'IRRF 3.500,00 com 2 dependentes = 0,00');
+SELECT is((SELECT desconto_aplicado FROM folha.calc_irrf(3500.00, 308.60, 2, '2026-10-31')), 'legais',
+  'IRRF 3.500,00 com 2 dependentes: deduções legais vencem o simplificado');
+-- Data de pagamento, não competência (E-16d): 5.400,00 com INSS 557,51; simplificado;
+-- base 4.792,80; 27,5%: 1.318,02 - 908,73 = 409,29. Pago em 31/12/2025 não há redução;
+-- pago em 01/01/2026 a redução é 978,62 - 0,133145 x 5.400,00 = 259,637 -> 149,653
+SELECT is((SELECT valor_irrf FROM folha.calc_irrf(5400.00, 557.51, 0, '2025-12-31')), 409.29::numeric,
+  'IRRF 5.400,00 pago em 31/12/2025 = 409,29 (tabela de 2025, sem redução)');
+SELECT is((SELECT valor_irrf FROM folha.calc_irrf(5400.00, 557.51, 0, '2026-01-01')), 149.65::numeric,
+  'IRRF 5.400,00 pago em 01/01/2026 = 149,65 (redução da Lei 15.270/2025)');
 
 -- ---------------------------------------------------------------------------
--- FGTS — 3 golden cases
+-- FGTS por categoria
 -- ---------------------------------------------------------------------------
-
--- Caso 11: CLT padrão R$ 3.000,00 → FGTS R$ 240,00 (8%)
+SELECT is((SELECT fgts_deposito FROM folha.calc_fgts(3000.00, 'clt', '2026-10-01')), 240.00::numeric,
+  'FGTS CLT 3.000,00 = 240,00 (8%)');
+SELECT is((SELECT fgts_deposito FROM folha.calc_fgts(1200.00, 'aprendiz', '2026-10-01')), 24.00::numeric,
+  'FGTS aprendiz 1.200,00 = 24,00 (2%)');
 SELECT is(
-  (SELECT fgts_deposito FROM folha.calc_fgts(3000.00, 'clt', '2026-10-01')),
-  240.00::numeric,
-  'FGTS CLT R$ 3.000,00 = R$ 240,00 (8%)'
-);
-
--- Caso 12: Aprendiz R$ 1.200,00 → FGTS R$ 24,00 (2%)
-SELECT is(
-  (SELECT fgts_deposito FROM folha.calc_fgts(1200.00, 'aprendiz', '2026-10-01')),
-  24.00::numeric,
-  'FGTS Aprendiz R$ 1.200,00 = R$ 24,00 (2%)'
-);
-
--- Caso 13: Multa rescisória sobre FGTS depósito
-SELECT is(
-  (SELECT fgts_multa_rescisoria FROM folha.calc_fgts(3000.00, 'clt', '2026-10-01')),
-  96.00::numeric,
-  'FGTS multa rescisória sobre R$ 240,00 = R$ 96,00 (40%)'
-);
+  ARRAY[(SELECT fgts_deposito FROM folha.calc_fgts(1200.00, 'estagio', '2026-10-01')),
+        (SELECT fgts_deposito FROM folha.calc_fgts(5000.00, 'pj', '2026-10-01')),
+        (SELECT fgts_deposito FROM folha.calc_fgts(6000.00, 'contribuinte_individual', '2026-10-01'))],
+  ARRAY[0, 0, 0]::numeric[],
+  'FGTS: estagiário, PJ e contribuinte individual sem depósito');
+SELECT is_empty(
+  $$SELECT p.oid::regprocedure::text FROM pg_proc p
+     WHERE p.pronamespace = 'folha'::regnamespace AND p.proname = 'calc_fgts'
+       AND 'fgts_multa_rescisoria' = ANY (p.proargnames)$$,
+  'calc_fgts não devolve mais a "multa" de 40% sobre o depósito do mês');
 
 -- ---------------------------------------------------------------------------
--- Funções retornam metadados de versão
+-- Metadados e falhas
 -- ---------------------------------------------------------------------------
-
--- Caso 14: calc_inss retorna tabela_vigencia
-SELECT ok(
-  (SELECT tabela_vigencia IS NOT NULL FROM folha.calc_inss(3000.00, '2026-10-01')),
-  'calc_inss retorna tabela_vigencia'
-);
-
--- Caso 15: calc_irrf retorna tabela_hash
-SELECT ok(
-  (SELECT tabela_hash IS NOT NULL FROM folha.calc_irrf(3000.00, 0, false, '2026-10-01')),
-  'calc_irrf retorna tabela_hash para auditoria'
-);
-
--- Caso 16: calc_fgts retorna aliquota
-SELECT is(
-  (SELECT aliquota FROM folha.calc_fgts(3000.00, 'clt', '2026-10-01')),
-  0.08::numeric,
-  'calc_fgts retorna alíquota 8% para CLT'
-);
-
--- Caso 17: Competência sem tabela deve falhar
+SELECT is((SELECT tabela_vigencia FROM folha.calc_inss(3000.00, '2026-10-01')), '2026-01-01'::date,
+  'calc_inss devolve a vigência da tabela usada');
+SELECT is((SELECT tabela_vigencia FROM folha.calc_irrf(3000.00, 248.60, 0, '2025-03-31')), '2024-02-01'::date,
+  'calc_irrf devolve a vigência da tabela escolhida pela data de pagamento');
+SELECT is((SELECT aliquota FROM folha.calc_fgts(3000.00, 'clt', '2026-10-01')), 0.08::numeric,
+  'calc_fgts devolve a alíquota de 8% para CLT');
 SELECT throws_ok(
   $$SELECT * FROM folha.calc_inss(3000.00, '2020-01-01')$$,
   'Tabela INSS não encontrada para competência 2020-01-01',
-  'calc_inss falha quando tabela não existe para competência'
-);
+  'calc_inss falha quando não há tabela para a competência');
+SELECT hasnt_function('folha', 'calc_irrf', ARRAY['numeric', 'integer', 'boolean', 'date'],
+  'a assinatura antiga de calc_irrf (base líquida de INSS e competência) foi removida');
 
 SELECT * FROM finish();
 ROLLBACK;
