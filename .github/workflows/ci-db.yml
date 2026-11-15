@@ -114,9 +114,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # A imagem do runner pode nao criar o cluster ao instalar o pacote.
+          if ! sudo pg_lsclusters -h | grep -q "^17 *main "; then
+            sudo pg_createcluster 17 main --port "${PGPORT}"
+          fi
           sudo pg_ctlcluster 17 main start
-          sudo -u postgres psql -c "ALTER USER postgres PASSWORD '${PGPASSWORD}';"
-          sudo -u postgres psql -c "CREATE DATABASE ${PGDATABASE} OWNER postgres;"
+          sudo pg_lsclusters
+          sudo -u postgres psql -p "${PGPORT}" -c "ALTER USER postgres PASSWORD '${PGPASSWORD}';"
+          sudo -u postgres psql -p "${PGPORT}" -c "CREATE DATABASE ${PGDATABASE} OWNER postgres;"
 
       - name: Run replay and pgTAP tests
         shell: bash
