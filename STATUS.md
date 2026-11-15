@@ -1,5 +1,47 @@
 # DNEX Folha — Status do Repositório
 
+## Frente 15/11/2026 (noite) — Migration 0024: empregador em quatro níveis e conta da sessão
+
+Branch `feat/folha-empregador-20261115`, PR 3 em rascunho. Nada aplicado em produção.
+**Pode ser mesclada como endurecimento; NÃO aplicar em produção** antes da dependência do dnex-gestao abaixo.
+
+### O que entrou
+
+- **Migration 0024** (`migrations/supabase/0024_folha_empregador_parametros.supabase.sql`, reversão em `.down.sql`): sete tabelas com `account_id` (`employer`, `employer_regime`, `establishment`, `establishment_fap`, `tax_allocation`, `tax_allocation_detail`, `contract_tax_allocation`); vigência em duas datas inclusivas, sem sobreposição por constraint de exclusão (`btree_gist`, extensão nova neste repositório); chaves estrangeiras compostas com `account_id` e hierarquia coerente na conta (estabelecimento preso ao empregador em contrato e folha; rateio com contrato e lotação do mesmo empregador); `employer_id`/`establishment_id` anuláveis em `employee`, `employment_contract` e `payroll_run`; RLS com FORCE; ACL que revoga de todo papel antes de conceder (worker lê e grava, data_owner só lê). Nenhum valor normativo semeado.
+- **Rateio do contrato:** soma 100 em cada dia coberto, conferida no fim da transação por trigger SECURITY DEFINER sem RLS (não depende do contexto da sessão) e serializada por contrato (duas transações concorrentes não passam com 100 cada).
+- **Parâmetros por vigência:** o catálogo é `folha.payroll_parameter` (global) e a leitura é `folha.get_param`, ambos da 0023; a 0024 só acrescenta a constraint de vigências sem sobreposição por chave.
+- **Conta da sessão:** `folha.request_context_account_id()` valida o contexto pelo protocolo do `gestao_auth` (`request_context` + asserção consumida + `session_user`/PID/txid + funções de principal e de escopo do próprio gestao). `folha.current_account_id()` deixa de aceitar o parâmetro `folha.account_id`, exceto para o papel de teste `dnex_folha_ci` em banco com o marcador de CI; a migration aborta se o papel existir sem o marcador. A leitura da 0014 (asserção não consumida pelo `assertion_id`) não era o protocolo e foi removida.
+- **CI:** `tests/ci/bootstrap.sql` reproduz o protocolo do gestao (tabelas, `begin_request`, validação de principal e de escopo) em vez do stub de cinco colunas; `tests/ci/concorrencia_rateio.sh` roda a corrida com duas conexões; `tests/ci/replay.sh` o chama.
+- **Testes:** `0024_empregador_parametros` (165 asserções: isolamento e rateio com o worker pelo protocolo real, cada vínculo do contexto adulterado, reserva de CI, hierarquia, ACL para qualquer papel); `0014_folha_rls_isolation` (19); `0023_eventos_vida_dourados` e `eventos_vida_calculo` rodam como o login de teste do worker, com contexto aberto por `begin_request`.
+- **ADR:** `docs/02-decisoes/ADR-empregador-quatro-niveis.md` (proposta; aceite do proprietário pendente).
+
+### Dependências no dnex-gestao (nada foi criado lá)
+
+1. Não existe grupo de principal para a Folha (`api`, `fiscal_worker`, `outbox_worker`, `context_issuer`, `producer`). Nenhum login com acesso às tabelas da Folha abre contexto; depois da 0024 a conta do worker é sempre nula em produção. O grupo `folha_worker` do bootstrap existe só para os testes.
+2. Não existe permissão da Folha na lista fechada de `has_permission` (`folha.read`, pedida por `mask_cpf`, devolve falso).
+3. Não existe função do gestao que devolva a conta do contexto; a Folha lê as duas tabelas do `gestao_auth` e precisa de acesso a elas para quem aplica a migration.
+4. O protocolo do gestao está em preview ("NO-GO para deploy, homologação e produção" no README das migrations do gestao).
+
+### Verificado em execução (PostgreSQL 17 + pgTAP em Docker local, banco recriado, roteiro de `tests/ci/replay.sh`)
+
+- Bootstrap, migrations 0014 a 0024 e os sete arquivos de teste: 660 asserções, todas aprovadas (0014: 19; 0022: 25; 0023: 371; 0024: 165; dashboard: 12; eventos_vida: 47; golden: 21), mais a corrida do rateio com duas conexões em READ COMMITTED e REPEATABLE READ.
+- Fora do roteiro do CI, em banco local: os testes falham quando a leitura antiga é reposta, quando o trigger do rateio volta a INVOKER, quando a serialização é retirada e quando a reserva ignora o marcador; a migration aborta com papel de teste sem marcador, sem `gestao_auth.request_context` e com vigências sobrepostas no catálogo; com default ACL hostil no schema `folha` o teste de ACL continua verde; `up → down → up` funciona e a reversão recusa com dados.
+
+### Não verificado
+
+- Produção: forma real do `gestao_auth`; papel que aplica com BYPASSRLS e com acesso ao `gestao_auth`; `btree_gist`; papéis com EXECUTE em `current_account_id()` concedido fora do repositório; chamadores que ainda definam `folha.account_id`.
+- Custo de `current_account_id()` nas policies da 0014, que a chamam por linha.
+- Documentação funcional no vault `DNEX-Documentacao`: não atualizada (vault inacessível neste host). Pendência documental aberta.
+
+### Próximas fatias
+
+- Grupo e permissão da Folha no gestao; depois, trocar a leitura direta por função do gestao.
+- Encargos da empresa por estabelecimento e lotação, lendo estas tabelas e `get_param`.
+- Preencher `employer_id`/`establishment_id` nos dados existentes e torná-las obrigatórias.
+- Listas oficiais de códigos (natureza jurídica, classificação tributária, tipo de lotação, FPAS, terceiros): a validar na fonte.
+
+---
+
 ## Frente 15/11/2026 — Correção do motor de eventos de vida (migration 0023)
 
 Estado: migration e testes fechados contra banco real. Replay local do zero (Postgres 17 + pgTAP em Docker, roteiro

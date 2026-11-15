@@ -5,13 +5,29 @@
 -- Valores que não vêm dos pareceres estão marcados "derivado" no texto da asserção.
 -- Executar após as migrations 0014–0023. Nada é persistido (ROLLBACK no final).
 BEGIN;
+
+-- Conta da sessão pelo protocolo do gestao_auth, como em produção: o emissor registra a
+-- asserção, o login do worker a consome com begin_request e o contexto fica preso a
+-- session_user + PID + txid. Por isso o arquivo roda como o login de teste do worker
+-- (SET LOCAL SESSION AUTHORIZATION), não como superusuário: desde a migration 0024 não há
+-- outro jeito de as funções do motor (SECURITY DEFINER) enxergarem a conta. O que exige
+-- superusuário (gravar a asserção, dados de outra conta, alterar parâmetro) fica entre
+-- RESET SESSION AUTHORIZATION e SET LOCAL SESSION AUTHORIZATION.
+INSERT INTO gestao_finance.enterprise_scope_registry (account_id, legal_entity_id, branch_id)
+VALUES ('e0000000-0000-0000-0000-000000000099', 'e1000000-0000-0000-0000-000000000099', 'e2000000-0000-0000-0000-000000000099');
+INSERT INTO gestao_auth.access_assertion
+  (assertion_id, subject_id, subject_type, principal_group, runtime_session_user,
+   account_id, legal_entity_id, branch_id, permissions, issued_at, expires_at)
+VALUES ('aa000000-0000-0000-0000-000000000099', gen_random_uuid(), 'system', 'folha_worker', 'dnex_folha_ci_login',
+        'e0000000-0000-0000-0000-000000000099', 'e1000000-0000-0000-0000-000000000099', 'e2000000-0000-0000-0000-000000000099', ARRAY['folha.ci'], now(), now() + interval '4 minutes');
+SET LOCAL SESSION AUTHORIZATION dnex_folha_ci_login;
+DO $$ BEGIN PERFORM gestao_auth.begin_request('aa000000-0000-0000-0000-000000000099', gen_random_uuid(), gen_random_uuid()); END $$;
+
 SELECT plan(371);
 
 -- ---------------------------------------------------------------------------
 -- Apoio
 -- ---------------------------------------------------------------------------
-DO $$ BEGIN PERFORM set_config('folha.account_id', 'e0000000-0000-0000-0000-000000000099', true); END $$;
-
 CREATE TEMP SEQUENCE seq_cpf START 10000000001;
 
 CREATE FUNCTION pg_temp.mk(
@@ -83,8 +99,12 @@ INSERT INTO c VALUES
   ('g11',   pg_temp.mk('2004-03-01', 2400.00)),
   ('g12',   pg_temp.mk('2026-08-17', 2100.00)),
   ('pj',    pg_temp.mk('2024-01-01', 5000.00, 'pj')),
-  ('est',   pg_temp.mk('2024-01-01', 1500.00, 'estagio')),
+  ('est',   pg_temp.mk('2024-01-01', 1500.00, 'estagio'));
+-- Contrato de outra conta: o worker não o gravaria (RLS); entra como superusuário.
+RESET SESSION AUTHORIZATION;
+INSERT INTO c VALUES
   ('outro', pg_temp.mk('2024-01-01', 3000.00, 'clt', 'e0000000-0000-0000-0000-000000000098'));
+SET LOCAL SESSION AUTHORIZATION dnex_folha_ci_login;
 
 CREATE FUNCTION pg_temp.cid(p_caso text) RETURNS uuid LANGUAGE sql AS $$ SELECT cid FROM c WHERE caso = p_caso $$;
 
@@ -375,7 +395,9 @@ SELECT ok(
   'G01: parâmetros A VALIDAR NA FONTE usados no cálculo voltam em pendencias_validacao');
 
 -- Alternativas dos pareceres: INSS do 13º sem os avos da projeção do aviso (parâmetro a_validar = 0)
+RESET SESSION AUTHORIZATION;   -- o worker só lê o catálogo
 UPDATE folha.payroll_parameter SET valor = 0 WHERE chave = 'inss_projecao_aviso_incide';
+SET LOCAL SESSION AUTHORIZATION dnex_folha_ci_login;
 SELECT is(round((SELECT r.inss_13 FROM folha.calc_rescisao(pg_temp.cid('g01'), '2026-10-13', 'sem_justa_causa', 'indenizado_empregador',
           p_periodo_aquisitivo_inicio => '2026-03-10', p_periodos_vencidos => 1, p_fgts_base_extrato => 6500.00) r) * 100)::bigint,
   13769::bigint, 'G01 alternativa: inss_13 = 13769 sem INSS sobre os avos da projeção');
@@ -388,7 +410,9 @@ SELECT is(round((SELECT r.inss_13 FROM folha.calc_rescisao(pg_temp.cid('g11'), '
 SELECT is(round((SELECT r.inss_13 FROM folha.calc_rescisao(pg_temp.cid('g12'), '2026-11-10', 'sem_justa_causa', 'indenizado_empregador',
           p_fgts_base_extrato => 420.00) r) * 100)::bigint,
   3938::bigint, 'G12 alternativa: inss_13 = 3938');
+RESET SESSION AUTHORIZATION;   -- o worker só lê o catálogo
 UPDATE folha.payroll_parameter SET valor = 1 WHERE chave = 'inss_projecao_aviso_incide';
+SET LOCAL SESSION AUTHORIZATION dnex_folha_ci_login;
 
 -- Limite do art. 477 § 5º: desconto do art. 480 acima de uma remuneração não é descontado (derivado)
 SELECT pg_temp.confere('Limite 477 § 5º (termo em 31/12; teto do 479 = 4.160,00; prejuízo 5.000,00)',

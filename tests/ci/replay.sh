@@ -33,6 +33,11 @@ for test_file in "${REPO_ROOT}"/tests/folha/*.pgtap.sql; do
   fi
 done
 
+echo "==> Executando testes de concorrência (duas conexões)..."
+if ! bash "${SCRIPT_DIR}/concorrencia_rateio.sh"; then
+  FAILED=$((FAILED + 1))
+fi
+
 if [ "${FAILED}" -gt 0 ]; then
   echo "ERRO: ${FAILED} arquivo(s) de teste falharam."
   exit 1

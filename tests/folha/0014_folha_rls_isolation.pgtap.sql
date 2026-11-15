@@ -3,14 +3,13 @@
 -- Executar com: psql -f tests/folha/0014_folha_rls_isolation.pgtap.sql
 BEGIN;
 
-SELECT plan(17);
+SELECT plan(19);
 
 -- ---------------------------------------------------------------------------
 -- Setup: tenants e dados de teste
 -- ---------------------------------------------------------------------------
 DO $$
 BEGIN
-  -- Criar tenants de teste via gestao_auth (padrão real) ou fallback direto
   IF NOT EXISTS (SELECT 1 FROM folha.employee WHERE account_id = 'a0000000-0000-0000-0000-000000000001') THEN
     INSERT INTO folha.employee (account_id, cpf, nome_completo, data_nascimento)
     VALUES ('a0000000-0000-0000-0000-000000000001', '11111111111', 'Tenant A Employee', '1990-01-01');
@@ -56,14 +55,16 @@ SELECT is(
 
 -- ---------------------------------------------------------------------------
 -- 5. Tenant A não lê dados de Tenant B (isolamento SELECT)
--- Nota: usa SET LOCAL folha.account_id como fallback porque gestao_auth.begin_request
--- exige asserção válida com nonce single-use. Em produção, o middleware chama
--- begin_request; em teste unitário, usamos o fallback direto da função current_account_id().
--- ---------------------------------------------------------------------------
+-- A conta da sessão vem da reserva por parâmetro (folha.account_id), que desde a
+-- migration 0024 só vale para o papel de teste dnex_folha_ci (membro do worker, sem
+-- BYPASSRLS). O caminho de produção, pela asserção de gestao_auth, é exercido em
+-- tests/folha/0024_empregador_parametros.pgtap.sql.
 -- O teste roda como superusuario, que ignora RLS mesmo com FORCE: a leitura e feita
--- com o papel de trabalho e o resultado e conferido depois de voltar ao papel original.
+-- com o papel de teste e o resultado e conferido depois de voltar ao papel original
+-- (as funcoes do pgTAP nao sao executaveis pelo papel de teste).
+-- ---------------------------------------------------------------------------
 SET LOCAL folha.account_id = 'a0000000-0000-0000-0000-000000000001';
-SET LOCAL ROLE dnex_gestao_folha_worker;
+SET LOCAL ROLE dnex_folha_ci;
 SELECT count(*) AS proprios_a FROM folha.employee WHERE account_id = 'a0000000-0000-0000-0000-000000000001' \gset
 SELECT count(*) AS alheios_a FROM folha.employee WHERE account_id = 'b0000000-0000-0000-0000-000000000002' \gset
 RESET ROLE;
@@ -75,12 +76,14 @@ SELECT is(
 );
 
 -- ---------------------------------------------------------------------------
--- 6. Tenant B não lê dados de Tenant A
+-- 6. Tenant B não lê dados de Tenant A (e vê o próprio)
 -- ---------------------------------------------------------------------------
 SET LOCAL folha.account_id = 'b0000000-0000-0000-0000-000000000002';
-SET LOCAL ROLE dnex_gestao_folha_worker;
+SET LOCAL ROLE dnex_folha_ci;
+SELECT count(*) AS proprios_b FROM folha.employee WHERE account_id = 'b0000000-0000-0000-0000-000000000002' \gset
 SELECT count(*) AS alheios_b FROM folha.employee WHERE account_id = 'a0000000-0000-0000-0000-000000000001' \gset
 RESET ROLE;
+SELECT is(:proprios_b::bigint, 1::bigint, 'Tenant B ve o proprio employee');
 SELECT is(
   :alheios_b::bigint,
   0::bigint,
@@ -88,20 +91,32 @@ SELECT is(
 );
 
 -- ---------------------------------------------------------------------------
--- 7. tax_table_version é legível globalmente (leitura universal)
+-- 7. tax_table_version é legível sem conta na sessão (leitura universal)
+--    Lida com o worker, sem asserção e sem reserva: precisa enxergar as linhas
+--    semeadas pela 0015 (o superusuário as conta sem RLS, como referência).
 -- ---------------------------------------------------------------------------
 RESET folha.account_id;
+SELECT count(*) AS tabelas_total FROM folha.tax_table_version \gset
+SET LOCAL ROLE dnex_gestao_folha_worker;
+SELECT count(*) AS tabelas_worker FROM folha.tax_table_version \gset
+RESET ROLE;
 SELECT ok(
-  (SELECT count(*) >= 0 FROM folha.tax_table_version),
-  'tax_table_version permite leitura sem tenant context'
+  :tabelas_total > 0 AND :tabelas_worker = :tabelas_total,
+  'tax_table_version: worker sem conta na sessão lê todas as linhas semeadas'
 );
 
 -- ---------------------------------------------------------------------------
--- 8. earning_deduction_code global é legível por qualquer tenant
+-- 8. Rubricas globais são legíveis por qualquer tenant
+--    Tenant A, sem rubrica própria, enxerga exatamente as globais da 0017.
 -- ---------------------------------------------------------------------------
+SELECT count(*) AS globais_total FROM folha.earning_deduction_code WHERE is_global \gset
 SET LOCAL folha.account_id = 'a0000000-0000-0000-0000-000000000001';
+SET LOCAL ROLE dnex_folha_ci;
+SELECT count(*) AS globais_a FROM folha.earning_deduction_code \gset
+RESET ROLE;
+RESET folha.account_id;
 SELECT ok(
-  (SELECT count(*) >= 0 FROM folha.earning_deduction_code WHERE is_global = true),
+  :globais_total > 0 AND :globais_a = :globais_total,
   'Rubricas globais são legíveis por Tenant A'
 );
 
@@ -115,25 +130,28 @@ SELECT is(
 );
 
 -- ---------------------------------------------------------------------------
--- 10. Auditoria é append-only (UPDATE deve falhar)
+-- 10. Auditoria é append-only (UPDATE deve falhar com a exceção do trigger)
 -- ---------------------------------------------------------------------------
-DO $$
-BEGIN
-  INSERT INTO folha.auditoria (account_id, actor, acao, recurso)
-  VALUES ('a0000000-0000-0000-0000-000000000001', 'test', 'test_action', 'test_resource');
+INSERT INTO folha.auditoria (account_id, actor, acao, recurso)
+VALUES ('a0000000-0000-0000-0000-000000000001', 'test', 'test_action', 'test_resource');
 
-  BEGIN
-    UPDATE folha.auditoria SET actor = 'modified' WHERE actor = 'test';
-    RAISE EXCEPTION 'UPDATE deveria ter falhado mas não falhou';
-  EXCEPTION WHEN OTHERS THEN
-    NULL; -- Esperado: trigger bloqueia UPDATE
-  END;
-END
-$$;
-SELECT pass('Auditoria rejeita UPDATE (append-only)');
+SELECT throws_ok(
+  $$UPDATE folha.auditoria SET actor = 'modified' WHERE actor = 'test'$$,
+  'P0001',
+  'folha.auditoria é append-only: UPDATE e DELETE são proibidos',
+  'Auditoria rejeita UPDATE (append-only)'
+);
 
 -- ---------------------------------------------------------------------------
--- 11. Grants corretos: folha_worker tem SELECT/INSERT/UPDATE em employee
+-- 11. Worker NÃO tem BYPASSRLS nem SUPERUSER (as policies valem para ele)
+-- ---------------------------------------------------------------------------
+SELECT ok(
+  (SELECT NOT rolbypassrls AND NOT rolsuper FROM pg_roles WHERE rolname = 'dnex_gestao_folha_worker'),
+  'dnex_gestao_folha_worker NÃO tem BYPASSRLS'
+);
+
+-- ---------------------------------------------------------------------------
+-- 12. Grants corretos: folha_worker tem SELECT/INSERT/UPDATE em employee
 -- ---------------------------------------------------------------------------
 SELECT table_privs_are(
   'folha', 'employee', 'dnex_gestao_folha_worker',
@@ -142,7 +160,7 @@ SELECT table_privs_are(
 );
 
 -- ---------------------------------------------------------------------------
--- 12. Grants corretos: data_owner tem apenas SELECT em employee
+-- 13. Grants corretos: data_owner tem apenas SELECT em employee
 -- ---------------------------------------------------------------------------
 SELECT table_privs_are(
   'folha', 'employee', 'dnex_gestao_data_owner',
