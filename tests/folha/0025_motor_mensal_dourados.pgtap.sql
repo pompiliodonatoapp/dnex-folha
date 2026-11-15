@@ -692,7 +692,7 @@ SELECT is(
   (SELECT count(*) FROM pg_policies p
     WHERE p.schemaname = 'folha'
       AND position('SELECT folha.current_account_id()' IN COALESCE(p.qual, '') || COALESCE(p.with_check, '')) > 0),
-  19::bigint, '19 policies do schema folha usam (SELECT folha.current_account_id()): 12 das 0014/0018 e 7 da 0024');
+  31::bigint, '31 policies do schema folha usam (SELECT folha.current_account_id()): 12 das 0014/0018, 7 da 0024 e 12 da 0026');
 SELECT is_empty(
   $$SELECT p.tablename, p.policyname FROM pg_policies p
      WHERE p.schemaname = 'folha'
