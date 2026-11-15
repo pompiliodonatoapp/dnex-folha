@@ -3,7 +3,7 @@
 -- Executar com: psql -f tests/folha/0014_folha_rls_isolation.pgtap.sql
 BEGIN;
 
-SELECT plan(19);
+SELECT plan(17);
 
 -- ---------------------------------------------------------------------------
 -- Setup: tenants e dados de teste
