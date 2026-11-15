@@ -1,8 +1,11 @@
 -- DNEX Folha — Migration 0024: empregador em quatro níveis e parâmetros por vigência.
 --
 -- Cria: employer, employer_regime, establishment, establishment_fap, tax_allocation,
---       tax_allocation_detail, contract_tax_allocation, payroll_parameter;
---       funções assertion_account_id(), get_parameter(text, date), validar_rateio_contrato().
+--       tax_allocation_detail, contract_tax_allocation;
+--       funções assertion_account_id() e validar_rateio_contrato().
+-- Parâmetros por vigência: NÃO cria tabela nem função. O catálogo é folha.payroll_parameter
+--       e a leitura é folha.get_param, ambos da migration 0023; aqui o catálogo só ganha a
+--       constraint de vigências sem sobreposição.
 -- Corrige: folha.current_account_id() — a reserva por parâmetro de sessão (folha.account_id)
 --       só vale para o papel de teste dnex_folha_ci, que esta migration NÃO cria.
 -- Adiciona: employer_id/establishment_id (anuláveis) em employee, employment_contract e payroll_run.
@@ -14,15 +17,16 @@
 -- a um trigger porque trigger de sobreposição não é seguro sob concorrência sem trava, e a
 -- índice único parcial porque este não detecta intervalos que se cruzam.
 --
--- Isolamento: todas as tabelas têm account_id, RLS com FORCE e policy pela conta da sessão.
+-- Isolamento: todas as tabelas novas têm account_id, RLS com FORCE e policy pela conta da sessão.
 -- As chaves estrangeiras entre as tabelas novas são compostas (account_id, id): um registro
 -- não pode apontar para pai de outra conta, nem conhecendo o uuid.
 --
 -- Reversão (manual, nesta ordem): DROP de contract_tax_allocation, tax_allocation_detail,
--- tax_allocation, establishment_fap, employer_regime e payroll_parameter; remover as colunas
+-- tax_allocation, establishment_fap e employer_regime; remover as colunas
 -- employer_id/establishment_id de payroll_run, employment_contract e employee; DROP de
--- establishment e employer; DROP das funções get_parameter e validar_rateio_contrato; DROP do
--- índice employment_contract_account_contract_key.
+-- establishment e employer; DROP da função validar_rateio_contrato; DROP do índice
+-- employment_contract_account_contract_key; DROP das constraints payroll_parameter_vigencia_valida
+-- e payroll_parameter_sem_sobreposicao.
 -- NÃO restaurar o corpo antigo de current_account_id(): ele é a falha corrigida aqui.
 BEGIN;
 
@@ -378,97 +382,30 @@ CREATE CONSTRAINT TRIGGER trg_validar_rateio_contrato
   FOR EACH ROW EXECUTE FUNCTION folha.validar_rateio_contrato();
 
 -- ---------------------------------------------------------------------------
--- 6. Parâmetros de folha por vigência
---    Nenhum valor é semeado aqui. status_validacao nasce 'a_validar'; só vira
---    'validado' com quem conferiu, quando e a fonte normativa.
+-- 6. Parâmetros por vigência: o catálogo é o da migration 0023
+--    folha.payroll_parameter (global, sem account_id: parâmetro legal é igual para todas as
+--    contas) e folha.get_param(chave, data), que levanta exceção quando não há parâmetro
+--    vigente, já existem desde a 0023 e continuam sendo a única tabela e a única leitura.
+--    Esta migration NÃO cria outra tabela nem outra função de leitura. Sobreposição por
+--    conta ou por empregador (convenção, regra da empresa) não tem consumidor hoje e fica
+--    para a fatia das três camadas de regra.
+--
+--    O que entra aqui é só a garantia que faltava no catálogo: vigências da mesma chave não
+--    se sobrepõem (a 0023 tem apenas UNIQUE (chave, vigencia_inicio) e get_param escolhe a
+--    vigência mais recente). Datas inclusivas, como get_param já lê.
 -- ---------------------------------------------------------------------------
-CREATE TABLE folha.payroll_parameter (
-  parameter_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  account_id uuid NOT NULL,
-  chave text NOT NULL CHECK (chave ~ '^[a-z][a-z0-9_]*$'),
-  valor_numerico numeric(18,6),
-  valor_texto text,
-  valor_json jsonb,
-  vigencia_inicio date NOT NULL,
-  vigencia_fim date,
-  fonte_normativa text,            -- ato, número, data e dispositivo
-  status_validacao text NOT NULL DEFAULT 'a_validar'
-    CHECK (status_validacao IN ('validado', 'a_validar')),
-  conferido_por text,
-  conferido_em timestamptz,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  updated_at timestamptz NOT NULL DEFAULT now(),
-  CONSTRAINT payroll_parameter_um_valor
-    CHECK (num_nonnulls(valor_numerico, valor_texto, valor_json) = 1),
-  CONSTRAINT payroll_parameter_validado_tem_prova CHECK (
-    status_validacao <> 'validado'
-    OR (conferido_por IS NOT NULL AND conferido_em IS NOT NULL
-        AND fonte_normativa IS NOT NULL AND btrim(fonte_normativa) <> '')
-  ),
-  CONSTRAINT payroll_parameter_vigencia_valida
+ALTER TABLE folha.payroll_parameter
+  ADD CONSTRAINT payroll_parameter_vigencia_valida
     CHECK (vigencia_fim IS NULL OR vigencia_fim >= vigencia_inicio),
-  CONSTRAINT payroll_parameter_sem_sobreposicao EXCLUDE USING gist (
-    account_id WITH =,
+  ADD CONSTRAINT payroll_parameter_sem_sobreposicao EXCLUDE USING gist (
     chave WITH =,
     daterange(vigencia_inicio, vigencia_fim, '[]') WITH &&
-  )
-);
-
--- get_parameter: devolve o parâmetro vigente na data, da conta da sessão. Levanta exceção
--- (SQLSTATE P0002) quando não há: nunca devolve padrão silencioso. SECURITY INVOKER de
--- propósito: quem filtra a conta é a RLS da tabela, com o papel de quem chama.
--- O resultado traz status_validacao; decidir se 'a_validar' pode entrar em cálculo é do
--- chamador (o motor deve recusar), não desta função.
-CREATE FUNCTION folha.get_parameter(p_chave text, p_data date) RETURNS jsonb
-LANGUAGE plpgsql STABLE SECURITY INVOKER
-SET search_path = pg_catalog
-AS $$
-DECLARE
-  v_conta uuid := folha.current_account_id();
-  v_resultado jsonb;
-BEGIN
-  IF p_chave IS NULL OR p_data IS NULL THEN
-    RAISE EXCEPTION 'get_parameter: chave e data são obrigatórias'
-      USING ERRCODE = 'null_value_not_allowed';
-  END IF;
-  IF v_conta IS NULL THEN
-    RAISE EXCEPTION 'get_parameter: conta não identificada na sessão'
-      USING ERRCODE = 'insufficient_privilege';
-  END IF;
-
-  SELECT jsonb_build_object(
-           'parameter_id', p.parameter_id,
-           'chave', p.chave,
-           'valor_numerico', p.valor_numerico,
-           'valor_texto', p.valor_texto,
-           'valor_json', p.valor_json,
-           'vigencia_inicio', p.vigencia_inicio,
-           'vigencia_fim', p.vigencia_fim,
-           'fonte_normativa', p.fonte_normativa,
-           'status_validacao', p.status_validacao)
-    INTO v_resultado
-    FROM folha.payroll_parameter p
-   WHERE p.account_id = v_conta
-     AND p.chave = p_chave
-     AND p.vigencia_inicio <= p_data
-     AND (p.vigencia_fim IS NULL OR p.vigencia_fim >= p_data);
-
-  IF v_resultado IS NULL THEN
-    RAISE EXCEPTION 'Parâmetro "%" sem vigência em %', p_chave, p_data
-      USING ERRCODE = 'no_data_found';
-  END IF;
-
-  RETURN v_resultado;
-END
-$$;
-
-REVOKE ALL ON FUNCTION folha.get_parameter(text, date) FROM PUBLIC, anon, authenticated, service_role;
-GRANT EXECUTE ON FUNCTION folha.get_parameter(text, date) TO dnex_gestao_folha_worker;
-GRANT EXECUTE ON FUNCTION folha.get_parameter(text, date) TO dnex_gestao_data_owner;
+  );
 
 -- ---------------------------------------------------------------------------
 -- 7. RLS (ENABLE + FORCE), policy por conta e ACL — REVOKE ALL antes de qualquer GRANT.
 --    Mesmo critério da 0014: worker lê e grava (sem DELETE); data_owner só lê.
+--    payroll_parameter não entra: RLS, policies e ACL dela são os da 0023.
 -- ---------------------------------------------------------------------------
 DO $$
 DECLARE
@@ -476,7 +413,7 @@ DECLARE
 BEGIN
   FOREACH v_tabela IN ARRAY ARRAY[
     'employer', 'employer_regime', 'establishment', 'establishment_fap',
-    'tax_allocation', 'tax_allocation_detail', 'contract_tax_allocation', 'payroll_parameter'
+    'tax_allocation', 'tax_allocation_detail', 'contract_tax_allocation'
   ]
   LOOP
     EXECUTE format('ALTER TABLE folha.%I ENABLE ROW LEVEL SECURITY', v_tabela);

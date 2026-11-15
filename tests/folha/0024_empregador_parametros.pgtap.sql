@@ -1,7 +1,7 @@
 -- DNEX Folha — Testes pgTAP da migration 0024: empregador em quatro níveis e parâmetros.
 -- Cobre: estrutura, RLS com FORCE, isolamento entre contas em cada tabela nova, a conta da
 -- sessão (reserva só para o papel de teste; asserção de gestao_auth como caminho real),
--- vigências sem sobreposição, rateio somando 100, get_parameter e ACL.
+-- vigências sem sobreposição (inclusive no catálogo de parâmetros da 0023), rateio somando 100 e ACL.
 --
 -- Como os testes exercem a RLS: o arquivo roda como superusuário (que ignora RLS mesmo com
 -- FORCE). Cada leitura ou gravação "como um papel" passa por pg_temp.como(), que troca o
@@ -9,10 +9,10 @@
 -- 'ERRO <sqlstate>: <mensagem>'), voltando ao papel original antes da asserção.
 -- Papéis usados: dnex_folha_ci (teste; membro do worker, sem BYPASSRLS),
 -- dnex_gestao_folha_worker e dnex_gestao_data_owner (os de produção).
--- Os valores e chaves de parâmetro deste arquivo são fictícios; nenhum é dado normativo.
+-- Os valores e a chave de parâmetro deste arquivo são fictícios; nenhum é dado normativo.
 BEGIN;
 
-SELECT plan(142);
+SELECT plan(128);
 
 -- ---------------------------------------------------------------------------
 -- Apoio
@@ -79,10 +79,9 @@ INSERT INTO folha.contract_tax_allocation (account_id, contract_id, allocation_i
   (:A, 'd0000000-0000-0000-0000-000000000001', '10000000-0000-0000-0000-000000000001', 100, '2026-01-01'),
   (:B, 'd0000000-0000-0000-0000-000000000002', '10000000-0000-0000-0000-000000000002', 100, '2026-01-01');
 
-INSERT INTO folha.payroll_parameter (account_id, chave, valor_numerico, vigencia_inicio, vigencia_fim, fonte_normativa, status_validacao, conferido_por, conferido_em) VALUES
-  (:A, 'parametro_teste', 123.45, '2026-01-01', '2026-12-31', 'fonte ficticia de teste', 'validado', 'teste', now()),
-  (:B, 'parametro_teste', 999.00, '2026-01-01', NULL, NULL, 'a_validar', NULL, NULL),
-  (:B, 'so_da_conta_b', 1, '2026-01-01', NULL, NULL, 'a_validar', NULL, NULL);
+-- Parâmetro fictício no catálogo global da 0023 (ver seção 9).
+INSERT INTO folha.payroll_parameter (chave, valor, vigencia_inicio, vigencia_fim, fonte_normativa) VALUES
+  ('parametro_teste', 1, '2026-01-01', '2026-12-31', 'fonte ficticia de teste');
 
 -- Asserções de gestao_auth para o caminho real (nonce dnex.context_nonce).
 INSERT INTO gestao_auth.access_assertion (assertion_id, account_id, consumed_at, revoked_at, expires_at) VALUES
@@ -100,8 +99,7 @@ SET CONSTRAINTS ALL DEFERRED;
 -- ---------------------------------------------------------------------------
 SELECT has_table('folha', t, 'tabela ' || t || ' existe')
   FROM unnest(ARRAY['employer', 'employer_regime', 'establishment', 'establishment_fap',
-                    'tax_allocation', 'tax_allocation_detail', 'contract_tax_allocation',
-                    'payroll_parameter']) AS t;
+                    'tax_allocation', 'tax_allocation_detail', 'contract_tax_allocation']) AS t;
 
 SELECT has_column('folha', 'employee', 'employer_id', 'employee tem employer_id');
 SELECT has_column('folha', 'employment_contract', 'employer_id', 'employment_contract tem employer_id');
@@ -134,19 +132,17 @@ SELECT ok(
   t || ' tem RLS habilitada e FORCE'
 )
   FROM unnest(ARRAY['employer', 'employer_regime', 'establishment', 'establishment_fap',
-                    'tax_allocation', 'tax_allocation_detail', 'contract_tax_allocation',
-                    'payroll_parameter']) AS t;
+                    'tax_allocation', 'tax_allocation_detail', 'contract_tax_allocation']) AS t;
 
 SELECT is(
   (SELECT count(*) FROM pg_policies
     WHERE schemaname = 'folha'
       AND tablename IN ('employer', 'employer_regime', 'establishment', 'establishment_fap',
-                        'tax_allocation', 'tax_allocation_detail', 'contract_tax_allocation',
-                        'payroll_parameter')
+                        'tax_allocation', 'tax_allocation_detail', 'contract_tax_allocation')
       AND cmd = 'ALL' AND permissive = 'PERMISSIVE'
       AND qual = '(account_id = folha.current_account_id())'
       AND with_check = '(account_id = folha.current_account_id())'),
-  8::bigint,
+  7::bigint,
   'cada tabela nova tem exatamente a policy por conta (USING e WITH CHECK)'
 );
 
@@ -154,9 +150,8 @@ SELECT is(
   (SELECT count(*) FROM pg_policies
     WHERE schemaname = 'folha'
       AND tablename IN ('employer', 'employer_regime', 'establishment', 'establishment_fap',
-                        'tax_allocation', 'tax_allocation_detail', 'contract_tax_allocation',
-                        'payroll_parameter')),
-  8::bigint,
+                        'tax_allocation', 'tax_allocation_detail', 'contract_tax_allocation')),
+  7::bigint,
   'nenhuma policy adicional (permissiva) nas tabelas novas'
 );
 
@@ -190,8 +185,7 @@ SELECT is(
   x.t || ': conta A vê as próprias linhas'
 )
   FROM (VALUES ('employer', 1), ('employer_regime', 1), ('establishment', 1), ('establishment_fap', 1),
-               ('tax_allocation', 2), ('tax_allocation_detail', 1), ('contract_tax_allocation', 1),
-               ('payroll_parameter', 1)) AS x(t, proprias);
+               ('tax_allocation', 2), ('tax_allocation_detail', 1), ('contract_tax_allocation', 1)) AS x(t, proprias);
 
 SELECT is(
   pg_temp.como('dnex_folha_ci', :A, NULL,
@@ -200,8 +194,7 @@ SELECT is(
   t || ': conta A não vê linha da conta B'
 )
   FROM unnest(ARRAY['employer', 'employer_regime', 'establishment', 'establishment_fap',
-                    'tax_allocation', 'tax_allocation_detail', 'contract_tax_allocation',
-                    'payroll_parameter']) AS t;
+                    'tax_allocation', 'tax_allocation_detail', 'contract_tax_allocation']) AS t;
 
 SELECT is(
   (SELECT count(*) FROM (
@@ -211,9 +204,8 @@ SELECT is(
      UNION ALL SELECT 1 FROM folha.establishment_fap WHERE account_id = :B
      UNION ALL SELECT 1 FROM folha.tax_allocation WHERE account_id = :B
      UNION ALL SELECT 1 FROM folha.tax_allocation_detail WHERE account_id = :B
-     UNION ALL SELECT 1 FROM folha.contract_tax_allocation WHERE account_id = :B
-     UNION ALL SELECT 1 FROM folha.payroll_parameter WHERE account_id = :B) s),
-  9::bigint,
+     UNION ALL SELECT 1 FROM folha.contract_tax_allocation WHERE account_id = :B) s),
+  7::bigint,
   'as linhas da conta B existem (o zero acima não é tabela vazia)'
 );
 
@@ -299,9 +291,9 @@ SELECT is(
   'worker com folha.account_id = A não lê employer algum (o papel de teste leu 1 acima)'
 );
 SELECT is(
-  pg_temp.como('dnex_gestao_folha_worker', :B, NULL, 'SELECT count(*) FROM folha.payroll_parameter'),
+  pg_temp.como('dnex_gestao_folha_worker', :B, NULL, 'SELECT count(*) FROM folha.employer_regime'),
   '0',
-  'worker com folha.account_id = B não lê parâmetro algum'
+  'worker com folha.account_id = B não lê regime algum'
 );
 SELECT matches(
   pg_temp.como('dnex_gestao_folha_worker', :A, NULL,
@@ -487,48 +479,6 @@ SELECT throws_ok(
   '23505', NULL,
   'tax_allocation rejeita código de lotação repetido no estabelecimento'
 );
-SELECT throws_ok(
-  format('INSERT INTO folha.payroll_parameter (account_id, chave, valor_texto, vigencia_inicio)
-          VALUES (%L, ''parametro_teste'', ''x'', ''2026-12-31'')', :A),
-  '23P01', NULL,
-  'payroll_parameter rejeita vigência sobreposta para a mesma chave e conta'
-);
-SELECT lives_ok(
-  format('INSERT INTO folha.payroll_parameter (account_id, chave, valor_texto, vigencia_inicio)
-          VALUES (%L, ''parametro_teste'', ''seguinte'', ''2027-01-01'')', :A),
-  'payroll_parameter aceita a vigência seguinte da mesma chave'
-);
-SELECT throws_ok(
-  format('INSERT INTO folha.payroll_parameter (account_id, chave, valor_numerico, valor_texto, vigencia_inicio)
-          VALUES (%L, ''dois_valores'', 1, ''x'', ''2026-01-01'')', :A),
-  '23514', NULL,
-  'payroll_parameter rejeita mais de um valor na mesma linha'
-);
-SELECT throws_ok(
-  format('INSERT INTO folha.payroll_parameter (account_id, chave, vigencia_inicio)
-          VALUES (%L, ''sem_valor'', ''2026-01-01'')', :A),
-  '23514', NULL,
-  'payroll_parameter rejeita linha sem valor'
-);
-SELECT throws_ok(
-  format('INSERT INTO folha.payroll_parameter (account_id, chave, valor_numerico, vigencia_inicio, status_validacao)
-          VALUES (%L, ''validado_sem_prova'', 1, ''2026-01-01'', ''validado'')', :A),
-  '23514', NULL,
-  'payroll_parameter rejeita "validado" sem fonte, conferente e data'
-);
-SELECT throws_ok(
-  format('INSERT INTO folha.payroll_parameter (account_id, chave, valor_numerico, vigencia_inicio, status_validacao)
-          VALUES (%L, ''estado_invalido'', 1, ''2026-01-01'', ''ok'')', :A),
-  '23514', NULL,
-  'payroll_parameter só aceita status validado ou a_validar'
-);
-SELECT is(
-  (SELECT column_default FROM information_schema.columns
-    WHERE table_schema = 'folha' AND table_name = 'payroll_parameter' AND column_name = 'status_validacao'),
-  '''a_validar''::text',
-  'payroll_parameter nasce a_validar'
-);
-
 -- ---------------------------------------------------------------------------
 -- 8. Rateio do contrato por lotação: soma 100 em cada dia coberto
 --    O trigger é adiado; SET CONSTRAINTS ALL IMMEDIATE faz a conferência do commit.
@@ -611,62 +561,48 @@ SELECT is(
 );
 
 -- ---------------------------------------------------------------------------
--- 9. get_parameter: devolve o vigente da conta; sem vigência, exceção
+-- 9. Parâmetros por vigência: catálogo global e leitura da 0023, sem duplicata
+--    A 0024 só acrescenta a constraint de vigências sem sobreposição.
+--    'parametro_teste' é chave fictícia (1 em 2026, do setup).
 -- ---------------------------------------------------------------------------
+SELECT hasnt_function('folha', 'get_parameter', 'não existe segunda função de leitura (só folha.get_param, da 0023)');
+SELECT hasnt_column('folha', 'payroll_parameter', 'account_id', 'payroll_parameter continua global (a 0024 não a recria por conta)');
 SELECT is(
-  pg_temp.como('dnex_folha_ci', :A, NULL, 'SELECT folha.get_parameter(''parametro_teste'', ''2026-06-01'') ->> ''valor_numerico'''),
-  '123.450000',
-  'get_parameter devolve o valor vigente da conta A'
+  (SELECT string_agg(policyname, ',' ORDER BY policyname) FROM pg_policies
+    WHERE schemaname = 'folha' AND tablename = 'payroll_parameter'),
+  'payroll_param_read,payroll_param_update,payroll_param_write',
+  'as policies de payroll_parameter são as três da 0023'
 );
-SELECT is(
-  pg_temp.como('dnex_folha_ci', :B, NULL, 'SELECT folha.get_parameter(''parametro_teste'', ''2026-06-01'') ->> ''valor_numerico'''),
-  '999.000000',
-  'a mesma chave na conta B devolve o valor da conta B'
+SELECT throws_ok(
+  $$INSERT INTO folha.payroll_parameter (chave, valor, vigencia_inicio, fonte_normativa)
+    VALUES ('parametro_teste', 9, '2026-12-31', 'fonte ficticia de teste')$$,
+  '23P01', NULL,
+  'payroll_parameter rejeita vigência sobreposta para a mesma chave (fim inclusivo)'
 );
-SELECT is(
-  pg_temp.como('dnex_folha_ci', :B, NULL, 'SELECT folha.get_parameter(''parametro_teste'', ''2026-06-01'') ->> ''status_validacao'''),
-  'a_validar',
-  'get_parameter informa o status de validação (a_validar não se passa por validado)'
+SELECT lives_ok(
+  $$INSERT INTO folha.payroll_parameter (chave, valor, vigencia_inicio, fonte_normativa)
+    VALUES ('parametro_teste', 2, '2027-01-01', 'fonte ficticia de teste')$$,
+  'payroll_parameter aceita a vigência seguinte da mesma chave'
 );
-SELECT is(
-  pg_temp.como('dnex_folha_ci', :A, NULL, 'SELECT folha.get_parameter(''parametro_teste'', ''2026-12-31'') ->> ''valor_numerico'''),
-  '123.450000',
-  'o último dia da vigência ainda pertence a ela'
+SELECT throws_ok(
+  $$INSERT INTO folha.payroll_parameter (chave, valor, vigencia_inicio, vigencia_fim, fonte_normativa)
+    VALUES ('parametro_teste', 9, '2025-12-31', '2025-01-01', 'fonte ficticia de teste')$$,
+  '23514', NULL,
+  'payroll_parameter rejeita fim anterior ao início'
 );
-SELECT is(
-  pg_temp.como('dnex_folha_ci', :A, NULL, 'SELECT folha.get_parameter(''parametro_teste'', ''2027-01-01'') ->> ''valor_texto'''),
-  'seguinte',
-  'no dia seguinte vale a vigência seguinte'
-);
-SELECT is(
-  pg_temp.como('dnex_folha_ci', :A, NULL, 'SELECT folha.get_parameter(''parametro_teste'', ''2025-12-31'')'),
-  'ERRO P0002: Parâmetro "parametro_teste" sem vigência em 2025-12-31',
-  'get_parameter levanta exceção antes do início da vigência'
-);
-SELECT is(
-  pg_temp.como('dnex_folha_ci', :A, NULL, 'SELECT folha.get_parameter(''chave_inexistente'', ''2026-06-01'')'),
-  'ERRO P0002: Parâmetro "chave_inexistente" sem vigência em 2026-06-01',
-  'get_parameter levanta exceção para chave inexistente'
-);
-SELECT is(
-  pg_temp.como('dnex_folha_ci', :A, NULL, 'SELECT folha.get_parameter(''so_da_conta_b'', ''2026-06-01'')'),
-  'ERRO P0002: Parâmetro "so_da_conta_b" sem vigência em 2026-06-01',
-  'get_parameter não devolve parâmetro de outra conta'
-);
-SELECT matches(
-  pg_temp.como('dnex_gestao_folha_worker', :A, NULL, 'SELECT folha.get_parameter(''parametro_teste'', ''2026-06-01'')'),
-  '^ERRO 42501: get_parameter: conta não identificada',
-  'worker com folha.account_id (sem asserção) não obtém parâmetro'
+SELECT is(folha.get_param('parametro_teste', '2026-12-31'), 1::numeric,
+  'get_param: o último dia da vigência ainda pertence a ela');
+SELECT is(folha.get_param('parametro_teste', '2027-01-01'), 2::numeric,
+  'get_param: no dia seguinte vale a vigência seguinte');
+SELECT throws_ok(
+  $$SELECT folha.get_param('parametro_teste', '2025-12-31')$$,
+  'P0001', 'Parâmetro parametro_teste não encontrado para a data 2025-12-31',
+  'get_param levanta exceção antes do início da vigência (sem valor de reserva)'
 );
 SELECT is(
-  pg_temp.como('dnex_gestao_folha_worker', NULL, 'aa000000-0000-0000-0000-000000000001', 'SELECT folha.get_parameter(''parametro_teste'', ''2026-06-01'') ->> ''fonte_normativa'''),
-  'fonte ficticia de teste',
-  'worker com asserção da conta A obtém o parâmetro da conta A, com a fonte'
-);
-SELECT matches(
-  pg_temp.como('dnex_folha_ci', :A, NULL, 'SELECT folha.get_parameter(NULL, ''2026-06-01'')'),
-  '^ERRO 22004: ',
-  'get_parameter recusa chave nula'
+  pg_temp.como('dnex_gestao_folha_worker', NULL, NULL, 'SELECT folha.get_param(''parametro_teste'', ''2026-06-01'')'),
+  '1',
+  'worker lê o catálogo global por get_param (não depende da conta da sessão)'
 );
 
 -- ---------------------------------------------------------------------------
@@ -679,8 +615,7 @@ SELECT is_empty(
       CROSS JOIN unnest(ARRAY['SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER']) AS p(priv)
      WHERE c.relnamespace = 'folha'::regnamespace
        AND c.relname IN ('employer', 'employer_regime', 'establishment', 'establishment_fap',
-                         'tax_allocation', 'tax_allocation_detail', 'contract_tax_allocation',
-                         'payroll_parameter')
+                         'tax_allocation', 'tax_allocation_detail', 'contract_tax_allocation')
        AND has_table_privilege(r.rolname, c.oid, p.priv)$$,
   'anon, authenticated e service_role não têm privilégio algum nas tabelas novas (nem por PUBLIC)'
 );
@@ -688,14 +623,12 @@ SELECT is_empty(
 SELECT table_privs_are('folha', t, 'dnex_gestao_folha_worker', ARRAY['SELECT', 'INSERT', 'UPDATE'],
                        t || ': worker lê e grava, sem DELETE')
   FROM unnest(ARRAY['employer', 'employer_regime', 'establishment', 'establishment_fap',
-                    'tax_allocation', 'tax_allocation_detail', 'contract_tax_allocation',
-                    'payroll_parameter']) AS t;
+                    'tax_allocation', 'tax_allocation_detail', 'contract_tax_allocation']) AS t;
 
 SELECT table_privs_are('folha', t, 'dnex_gestao_data_owner', ARRAY['SELECT'],
                        t || ': data_owner só lê')
   FROM unnest(ARRAY['employer', 'employer_regime', 'establishment', 'establishment_fap',
-                    'tax_allocation', 'tax_allocation_detail', 'contract_tax_allocation',
-                    'payroll_parameter']) AS t;
+                    'tax_allocation', 'tax_allocation_detail', 'contract_tax_allocation']) AS t;
 
 SELECT is_empty(
   $$SELECT r.rolname, p.oid::regprocedure::text
@@ -703,31 +636,28 @@ SELECT is_empty(
       CROSS JOIN (VALUES ('anon'), ('authenticated')) AS r(rolname)
      WHERE p.oid IN ('folha.current_account_id()'::regprocedure,
                      'folha.assertion_account_id()'::regprocedure,
-                     'folha.get_parameter(text,date)'::regprocedure,
                      'folha.validar_rateio_contrato()'::regprocedure)
        AND has_function_privilege(r.rolname, p.oid, 'EXECUTE')$$,
   'anon e authenticated não executam as funções desta migration (nem por PUBLIC)'
 );
 SELECT is(
   (SELECT count(*) FROM (VALUES ('dnex_gestao_folha_worker'), ('dnex_gestao_data_owner')) AS r(rolname)
-    CROSS JOIN (VALUES ('folha.current_account_id()'), ('folha.assertion_account_id()'),
-                       ('folha.get_parameter(text,date)')) AS f(sig)
+    CROSS JOIN (VALUES ('folha.current_account_id()'), ('folha.assertion_account_id()')) AS f(sig)
     WHERE has_function_privilege(r.rolname, f.sig::regprocedure, 'EXECUTE')),
-  6::bigint,
-  'worker e data_owner executam current_account_id, assertion_account_id e get_parameter'
+  4::bigint,
+  'worker e data_owner executam current_account_id e assertion_account_id'
 );
 SELECT is(
   (SELECT string_agg(p.proname || '=' || p.prosecdef::text, ',' ORDER BY p.proname)
      FROM pg_proc p
-    WHERE p.oid IN ('folha.current_account_id()'::regprocedure, 'folha.assertion_account_id()'::regprocedure,
-                    'folha.get_parameter(text,date)'::regprocedure)),
-  'assertion_account_id=true,current_account_id=false,get_parameter=false',
+    WHERE p.oid IN ('folha.current_account_id()'::regprocedure, 'folha.assertion_account_id()'::regprocedure)),
+  'assertion_account_id=true,current_account_id=false',
   'só assertion_account_id é SECURITY DEFINER; a condição do papel de teste roda como quem chama'
 );
 SELECT is_empty(
   $$SELECT p.oid::regprocedure::text FROM pg_proc p
      WHERE p.oid IN ('folha.current_account_id()'::regprocedure, 'folha.assertion_account_id()'::regprocedure,
-                     'folha.get_parameter(text,date)'::regprocedure, 'folha.validar_rateio_contrato()'::regprocedure)
+                     'folha.validar_rateio_contrato()'::regprocedure)
        AND NOT EXISTS (SELECT 1 FROM unnest(p.proconfig) AS c WHERE c LIKE 'search_path=%')$$,
   'as funções desta migration têm search_path fixo'
 );
