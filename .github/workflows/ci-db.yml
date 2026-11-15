@@ -1,0 +1,130 @@
+# DNEX Folha — CI de replay das migrations + testes pgTAP.
+# Estratégia: instala PostgreSQL 17 + pgTAP diretamente no runner ubuntu-latest
+# via repositório oficial PGDG (apt.postgresql.org). Isso evita a complexidade
+# de construir imagem Docker customizada com pgTAP e garante que a extensão
+# esteja instalada no SERVIDOR (não apenas no cliente).
+# O container postgres:17 como serviço não funciona porque não tem pgTAP
+# instalado no servidor e não é trivial injetar extensões nele via CI.
+name: DNEX Folha DB replay and pgTAP
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: folha-ci-db-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # -----------------------------------------------------------------------
+  # Job 1: Validação de sequência de migrations
+  # -----------------------------------------------------------------------
+  migration-sequence:
+    name: Migration sequence check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check migration numbering
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd migrations/supabase
+
+          # Extrai prefixos numéricos dos arquivos de migration (exclui .down.sql)
+          prefixes=()
+          for f in [0-9]*.supabase.sql; do
+            case "$f" in *.down.sql) continue ;; esac
+            prefix="${f%%_*}"
+            prefixes+=("$prefix")
+          done
+
+          # Verifica duplicatas
+          sorted=($(printf '%s\n' "${prefixes[@]}" | sort))
+          unique=($(printf '%s\n' "${prefixes[@]}" | sort -u))
+
+          if [ "${#sorted[@]}" -ne "${#unique[@]}" ]; then
+            echo "ERRO: Prefixos de migration duplicados encontrados:"
+            printf '%s\n' "${prefixes[@]}" | sort | uniq -d
+            exit 1
+          fi
+
+          # Verifica saltos na sequência
+          prev=""
+          for p in "${unique[@]}"; do
+            num=$((10#$p))
+            if [ -n "$prev" ]; then
+              expected=$((prev + 1))
+              if [ "$num" -ne "$expected" ]; then
+                echo "ERRO: Salto na sequência de migrations: esperado $expected, encontrado $num"
+                echo "Prefixos existentes: ${unique[*]}"
+                exit 1
+              fi
+            fi
+            prev=$num
+          done
+
+          echo "OK: Sequência de migrations válida (${#unique[@]} arquivos, sem duplicatas nem saltos)"
+
+  # -----------------------------------------------------------------------
+  # Job 2: Replay das migrations + testes pgTAP
+  # -----------------------------------------------------------------------
+  db-replay:
+    name: DB replay and pgTAP
+    needs: migration-sequence
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      PGHOST: localhost
+      PGPORT: "5432"
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGDATABASE: folha_ci
+      PGOPTIONS: "-c search_path=public,extensions"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # Instala PostgreSQL 17 + pgTAP via PGDG apt repo.
+      # A extensão pgTAP precisa estar instalada no servidor Postgres,
+      # não apenas como pacote cliente. O pacote postgresql-17-pgtap
+      # do PGDG instala os arquivos SQL da extensão no diretório correto.
+      - name: Install PostgreSQL 17 and pgTAP
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq curl gnupg lsb-release
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /usr/share/keyrings/postgresql-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/postgresql-archive-keyring.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-17 postgresql-client-17 postgresql-17-pgtap
+
+      - name: Start PostgreSQL and create test database
+        shell: bash
+        run: |
+          set -euo pipefail
+          # A imagem do runner pode nao criar o cluster ao instalar o pacote.
+          if ! sudo pg_lsclusters -h | grep -q "^17 *main "; then
+            sudo pg_createcluster 17 main --port "${PGPORT}"
+          fi
+          sudo pg_ctlcluster 17 main start
+          sudo pg_lsclusters
+          sudo -u postgres psql -p "${PGPORT}" -c "ALTER USER postgres PASSWORD '${PGPASSWORD}';"
+          sudo -u postgres psql -p "${PGPORT}" -c "CREATE DATABASE ${PGDATABASE} OWNER postgres;"
+
+      - name: Run replay and pgTAP tests
+        shell: bash
+        run: |
+          chmod +x tests/ci/replay.sh
+          tests/ci/replay.sh
