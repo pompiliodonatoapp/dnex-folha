@@ -10,7 +10,12 @@ SELECT plan(371);
 -- ---------------------------------------------------------------------------
 -- Apoio
 -- ---------------------------------------------------------------------------
-DO $$ BEGIN PERFORM set_config('folha.account_id', 'e0000000-0000-0000-0000-000000000099', true); END $$;
+-- Conta da sessão pelo caminho de produção: asserção de gestao_auth apontada pelo nonce.
+-- Desde a migration 0024 o parâmetro de sessão folha.account_id só vale para o papel de teste
+-- dnex_folha_ci e nunca dentro de função SECURITY DEFINER, como as do motor.
+INSERT INTO gestao_auth.access_assertion (assertion_id, account_id, expires_at)
+VALUES ('aa000000-0000-0000-0000-000000000099', 'e0000000-0000-0000-0000-000000000099', now() + interval '1 hour');
+DO $$ BEGIN PERFORM set_config('dnex.context_nonce', 'aa000000-0000-0000-0000-000000000099', true); END $$;
 
 CREATE TEMP SEQUENCE seq_cpf START 10000000001;
 

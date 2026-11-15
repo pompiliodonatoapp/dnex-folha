@@ -16,7 +16,11 @@ DECLARE
   v_emp uuid;
   v_cid uuid;
 BEGIN
-  PERFORM set_config('folha.account_id', v_conta::text, true);
+  -- Conta da sessão pelo caminho de produção (asserção de gestao_auth + nonce): desde a
+  -- migration 0024 o parâmetro folha.account_id não vale dentro de função SECURITY DEFINER.
+  INSERT INTO gestao_auth.access_assertion (assertion_id, account_id, expires_at)
+  VALUES ('aa000000-0000-0000-0000-000000000005', v_conta, now() + interval '1 hour');
+  PERFORM set_config('dnex.context_nonce', 'aa000000-0000-0000-0000-000000000005', true);
 
   INSERT INTO folha.employee (account_id, cpf, nome_completo, data_nascimento)
   VALUES (v_conta, '55555555555', 'Teste Eventos Vida Senior', '1985-06-15')
