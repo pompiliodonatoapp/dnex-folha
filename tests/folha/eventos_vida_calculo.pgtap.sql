@@ -5,6 +5,24 @@
 -- pareceres de 15/11/2026 (não são os casos dourados, que ficam em 0023_eventos_vida_dourados).
 -- Executar após as migrations 0014–0023. Nada é persistido (ROLLBACK no final).
 BEGIN;
+
+-- Conta da sessão pelo protocolo do gestao_auth, como em produção: o emissor registra a
+-- asserção, o login do worker a consome com begin_request e o contexto fica preso a
+-- session_user + PID + txid. Por isso o arquivo roda como o login de teste do worker
+-- (SET LOCAL SESSION AUTHORIZATION), não como superusuário: desde a migration 0024 não há
+-- outro jeito de as funções do motor (SECURITY DEFINER) enxergarem a conta. O que exige
+-- superusuário (gravar a asserção, dados de outra conta, alterar parâmetro) fica entre
+-- RESET SESSION AUTHORIZATION e SET LOCAL SESSION AUTHORIZATION.
+INSERT INTO gestao_finance.enterprise_scope_registry (account_id, legal_entity_id, branch_id)
+VALUES ('e0000000-0000-0000-0000-000000000005', 'e1000000-0000-0000-0000-000000000005', 'e2000000-0000-0000-0000-000000000005');
+INSERT INTO gestao_auth.access_assertion
+  (assertion_id, subject_id, subject_type, principal_group, runtime_session_user,
+   account_id, legal_entity_id, branch_id, permissions, issued_at, expires_at)
+VALUES ('aa000000-0000-0000-0000-000000000005', gen_random_uuid(), 'system', 'folha_worker', 'dnex_folha_ci_login',
+        'e0000000-0000-0000-0000-000000000005', 'e1000000-0000-0000-0000-000000000005', 'e2000000-0000-0000-0000-000000000005', ARRAY['folha.ci'], now(), now() + interval '4 minutes');
+SET LOCAL SESSION AUTHORIZATION dnex_folha_ci_login;
+DO $$ BEGIN PERFORM gestao_auth.begin_request('aa000000-0000-0000-0000-000000000005', gen_random_uuid(), gen_random_uuid()); END $$;
+
 SELECT plan(47);
 
 -- ---------------------------------------------------------------------------
@@ -16,12 +34,6 @@ DECLARE
   v_emp uuid;
   v_cid uuid;
 BEGIN
-  -- Conta da sessão pelo caminho de produção (asserção de gestao_auth + nonce): desde a
-  -- migration 0024 o parâmetro folha.account_id não vale dentro de função SECURITY DEFINER.
-  INSERT INTO gestao_auth.access_assertion (assertion_id, account_id, expires_at)
-  VALUES ('aa000000-0000-0000-0000-000000000005', v_conta, now() + interval '1 hour');
-  PERFORM set_config('dnex.context_nonce', 'aa000000-0000-0000-0000-000000000005', true);
-
   INSERT INTO folha.employee (account_id, cpf, nome_completo, data_nascimento)
   VALUES (v_conta, '55555555555', 'Teste Eventos Vida Senior', '1985-06-15')
   RETURNING employee_id INTO v_emp;
