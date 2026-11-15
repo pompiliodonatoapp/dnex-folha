@@ -25,17 +25,14 @@ SELECT is(
 );
 
 -- Valores esperados corrigidos em 15/11/2026 pelo parecer de DP (tabela progressiva de 2026 do seed 0015).
--- Caso 2 fica como pendencia conhecida: calc_inss perde 1 centavo de base por faixa (devolve 200,68);
--- a correcao vem na migration do motor (parte 2).
-SELECT todo_start('calc_inss perde 1 centavo por faixa; corrigido na migration do motor parte 2');
+-- O caso 2 era pendencia conhecida (calc_inss perdia 1 centavo de base por faixa e devolvia 200,68);
+-- a migration 0023 corrigiu as faixas e o caso passou a ser assercao normal.
 -- Caso 2: R$ 2.500,00 → INSS R$ 200,69 (faixa 2 parcial)
 SELECT is(
   (SELECT valor_inss FROM folha.calc_inss(2500.00, '2026-10-01')),
   200.69::numeric,
   'INSS R$ 2.500,00 = R$ 200,69'
 );
-
-SELECT todo_end();
 
 -- Caso 3: R$ 3.500,00 → INSS R$ 308,60 (faixa 3 parcial)
 SELECT is(
