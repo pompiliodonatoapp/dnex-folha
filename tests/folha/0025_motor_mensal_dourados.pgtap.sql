@@ -16,11 +16,15 @@ BEGIN;
 -- entre RESET SESSION AUTHORIZATION e SET LOCAL SESSION AUTHORIZATION.
 INSERT INTO gestao_finance.enterprise_scope_registry (account_id, legal_entity_id, branch_id)
 VALUES ('e0000000-0000-0000-0000-000000000025', 'e1000000-0000-0000-0000-000000000025', 'e2000000-0000-0000-0000-000000000025');
-INSERT INTO gestao_auth.access_assertion
-  (assertion_id, subject_id, subject_type, principal_group, runtime_session_user,
-   account_id, legal_entity_id, branch_id, permissions, issued_at, expires_at)
-VALUES ('aa000000-0000-0000-0000-000000000025', gen_random_uuid(), 'system', 'folha_worker', 'dnex_folha_ci_login',
-        'e0000000-0000-0000-0000-000000000025', 'e1000000-0000-0000-0000-000000000025', 'e2000000-0000-0000-0000-000000000025', ARRAY['folha.ci'], now(), now() + interval '4 minutes');
+-- Desde a migration 0028 a conta vem da claim da Folha (gestao_folha): o emissor registra a
+-- asserção com as cinco permissões e o login de teste, membro só de dnex_gestao_api, a consome.
+-- Esse login não tem GRANT nas tabelas da Folha; para o arquivo continuar a ler e gravar como
+-- o worker, recebe, só nesta transação, o espelho dos GRANTs do worker (tests/ci/bootstrap.sql,
+-- seção 6). Nenhum valor esperado mudou.
+DO $$ BEGIN
+  PERFORM dnex_folha_ci_apoio.emitir('aa000000-0000-0000-0000-000000000025', 'e0000000-0000-0000-0000-000000000025', 'e1000000-0000-0000-0000-000000000025', 'e2000000-0000-0000-0000-000000000025');
+  PERFORM dnex_folha_ci_apoio.espelhar_worker();
+END $$;
 SET LOCAL SESSION AUTHORIZATION dnex_folha_ci_login;
 DO $$ BEGIN PERFORM gestao_auth.begin_request('aa000000-0000-0000-0000-000000000025', gen_random_uuid(), gen_random_uuid()); END $$;
 
@@ -700,7 +704,7 @@ SELECT is(
   (SELECT count(*) FROM pg_policies p
     WHERE p.schemaname = 'folha'
       AND position('SELECT folha.current_account_id()' IN COALESCE(p.qual, '') || COALESCE(p.with_check, '')) > 0),
-  31::bigint, '31 policies do schema folha usam (SELECT folha.current_account_id()): 12 das 0014/0018, 7 da 0024 e 12 da 0026');
+  35::bigint, '35 policies do schema folha usam (SELECT folha.current_account_id()): 12 das 0014/0018, 7 da 0024, 12 da 0026, 1 da 0028 e 3 da 0029');
 SELECT is_empty(
   $$SELECT p.tablename, p.policyname FROM pg_policies p
      WHERE p.schemaname = 'folha'
@@ -743,7 +747,7 @@ SELECT throws_ok(
   'P0001', 'run_payroll_employee: sessão sem conta (contexto não aberto)',
   'contexto: grupo fora da lista permitida não calcula folha');
 RESET SESSION AUTHORIZATION;
-UPDATE folha.request_context_config SET principal_groups_permitidos = ARRAY['outro_grupo', 'folha_worker'];
+UPDATE folha.request_context_config SET principal_groups_permitidos = ARRAY['outro_grupo', 'api'];
 SET LOCAL SESSION AUTHORIZATION dnex_folha_ci_login;
 SELECT is(folha.current_account_id(), 'e0000000-0000-0000-0000-000000000025'::uuid,
   'contexto: grupo na lista permitida dá a conta');
@@ -805,6 +809,10 @@ SELECT is_empty(
 SELECT is(
   (SELECT count(*) FROM acl, unnest(acl.papeis) AS papel), 17::bigint,
   'ACL: 17 concessões esperadas (âncora do teste acima)');
+-- ACL conferida sem o espelho de CI (o login de teste não entra na ACL das migrations).
+RESET SESSION AUTHORIZATION;
+DO $$ BEGIN PERFORM dnex_folha_ci_apoio.desfazer_espelho(); END $$;
+SET LOCAL SESSION AUTHORIZATION dnex_folha_ci_login;
 SELECT is_empty(
   $$SELECT acl.sig || ' <- ' || CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE a.grantee::regrole::text END
       FROM acl JOIN pg_proc p ON p.oid = to_regprocedure(acl.sig)::oid,
@@ -812,6 +820,9 @@ SELECT is_empty(
      WHERE a.grantee <> p.proowner
        AND (a.grantee = 0 OR NOT (a.grantee::regrole::text = ANY (acl.papeis)))$$,
   'ACL: nenhum outro papel (nem PUBLIC) tem privilégio nas funções da 0025');
+RESET SESSION AUTHORIZATION;
+DO $$ BEGIN PERFORM dnex_folha_ci_apoio.espelhar_worker(); END $$;
+SET LOCAL SESSION AUTHORIZATION dnex_folha_ci_login;
 SELECT ok(
   NOT has_function_privilege('dnex_gestao_data_owner', 'folha.run_payroll_employee(uuid,uuid,integer,integer)', 'execute')
   AND NOT has_function_privilege('dnex_gestao_folha_worker', 'folha.irrf_apurar(numeric,numeric,integer,date,text)', 'execute')
