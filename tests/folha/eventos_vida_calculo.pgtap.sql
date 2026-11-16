@@ -15,11 +15,15 @@ BEGIN;
 -- RESET SESSION AUTHORIZATION e SET LOCAL SESSION AUTHORIZATION.
 INSERT INTO gestao_finance.enterprise_scope_registry (account_id, legal_entity_id, branch_id)
 VALUES ('e0000000-0000-0000-0000-000000000005', 'e1000000-0000-0000-0000-000000000005', 'e2000000-0000-0000-0000-000000000005');
-INSERT INTO gestao_auth.access_assertion
-  (assertion_id, subject_id, subject_type, principal_group, runtime_session_user,
-   account_id, legal_entity_id, branch_id, permissions, issued_at, expires_at)
-VALUES ('aa000000-0000-0000-0000-000000000005', gen_random_uuid(), 'system', 'folha_worker', 'dnex_folha_ci_login',
-        'e0000000-0000-0000-0000-000000000005', 'e1000000-0000-0000-0000-000000000005', 'e2000000-0000-0000-0000-000000000005', ARRAY['folha.ci'], now(), now() + interval '4 minutes');
+-- Desde a migration 0028 a conta vem da claim da Folha (gestao_folha): o emissor registra a
+-- asserção com as cinco permissões e o login de teste, membro só de dnex_gestao_api, a consome.
+-- Esse login não tem GRANT nas tabelas da Folha; para o arquivo continuar a ler e gravar como
+-- o worker, recebe, só nesta transação, o espelho dos GRANTs do worker (tests/ci/bootstrap.sql,
+-- seção 6). Nenhum valor esperado mudou.
+DO $$ BEGIN
+  PERFORM dnex_folha_ci_apoio.emitir('aa000000-0000-0000-0000-000000000005', 'e0000000-0000-0000-0000-000000000005', 'e1000000-0000-0000-0000-000000000005', 'e2000000-0000-0000-0000-000000000005');
+  PERFORM dnex_folha_ci_apoio.espelhar_worker();
+END $$;
 SET LOCAL SESSION AUTHORIZATION dnex_folha_ci_login;
 DO $$ BEGIN PERFORM gestao_auth.begin_request('aa000000-0000-0000-0000-000000000005', gen_random_uuid(), gen_random_uuid()); END $$;
 
