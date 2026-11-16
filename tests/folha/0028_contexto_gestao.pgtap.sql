@@ -205,7 +205,8 @@ SELECT is_empty(
 SELECT is(
   (SELECT string_agg(p.oid::regprocedure::text, ',' ORDER BY p.oid::regprocedure::text)
      FROM pg_proc p WHERE p.pronamespace = 'folha'::regnamespace AND has_function_privilege('dnex_gestao_api', p.oid, 'execute')
-      AND p.proname NOT LIKE 'portal\_%'),   -- as do Portal (0029) são conferidas no arquivo 0029
+      AND p.proname NOT LIKE 'portal\_%'     -- as do Portal (0029) são conferidas no arquivo 0029
+      AND p.proname NOT LIKE 'contabil\_%'), -- as da contabilização (0030) são conferidas no arquivo 0030
   (SELECT string_agg(sig, ',' ORDER BY sig) FROM acl WHERE papeis <> ARRAY[]::text[]),
   'dnex_gestao_api executa, no schema folha, exatamente as onze funções _v1 da 0028 (nenhuma das 0014 a 0027)');
 SELECT is_empty(
@@ -659,15 +660,19 @@ SELECT is(
   'auditoria: abertura, aprovação e fechamento com o subject de cada um');
 
 -- Transmissão
+-- Mudou com a migration 0030: o evento contábil deixou de ser um por resultado, com contas fixas
+-- no código. Os empregadores deste arquivo não têm configuração nem mapeamento contábil: a
+-- contabilização fica bloqueada (pendência) e o contador contábil devolve 0; os eventos do
+-- eSocial não dependem dela. A contabilização com mapeamento está no arquivo 0030.
 SELECT is(
   pg_temp.faz(:A, ARRAY['folha.read', 'folha.transmit'], :S_TX,
     'SELECT d.esocial_events_dispatched || ''/'' || d.contabil_events_dispatched FROM folha.folha_transmitir_v1((SELECT id FROM ids WHERE k = ''r1'')) d'),
-  '2/2', 'transmitir a folha fechada (folha.transmit): dois resultados, dois eventos de cada');
+  '2/0', 'transmitir a folha fechada (folha.transmit): dois resultados, dois eventos do eSocial; sem mapeamento contábil, nenhum lote contábil');
 SELECT is(
   (SELECT (SELECT count(*) FROM folha.esocial_event_outbox o WHERE o.run_id = pg_temp.id('r1') AND o.account_id = :A)::text
           || '/' || (SELECT count(*) FROM folha.accounting_outbox o WHERE o.run_id = pg_temp.id('r1') AND o.account_id = :A)::text
           || '/' || (SELECT count(*) FROM folha.esocial_event_outbox o WHERE o.account_id <> :A)::text),
-  '2/2/0', 'os eventos entram nas outboxes da conta do contexto, e em nenhuma outra');
+  '2/0/0', 'os eventos entram nas outboxes da conta do contexto, e em nenhuma outra (a contábil fica vazia: contabilização bloqueada)');
 SELECT is(
   (SELECT a.actor_subject::text || '/' || (a.detalhe->>'esocial') FROM folha.auditoria a
     WHERE a.recurso_id = pg_temp.id('r1') AND a.acao = 'transmitir_folha'),
@@ -684,7 +689,7 @@ RESET DateStyle;
 SELECT is(
   (SELECT (SELECT count(*) FROM folha.esocial_event_outbox o WHERE o.run_id = pg_temp.id('r1'))::text
           || '/' || (SELECT count(*) FROM folha.accounting_outbox o WHERE o.run_id = pg_temp.id('r1'))::text),
-  '2/2', 'as filas continuam com um evento por resultado');
+  '2/0', 'a fila do eSocial continua com um evento por resultado, e a contábil vazia');
 
 -- Cancelar (folha.close): a saída de "cancele e recalcule".
 SELECT matches(

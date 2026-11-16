@@ -1,0 +1,65 @@
+{
+  "contractVersion": "gestao.folha-handoff.v2",
+  "handoffKey": "h-c4dc98670f2133e7b67c46aa12ae9e1af3d08137",
+  "accountId": "a0000000-0000-0000-0000-000000000030",
+  "employerId": "2cdcbdbe-4f1a-432e-8b83-ae44a0d26228",
+  "payrollRunId": "0bd7aa9f-cd9e-4636-adc3-a7d6742f80e2",
+  "competence": "2026-10",
+  "eventType": "estorno",
+  "entryDate": "2026-10-31",
+  "version": 1,
+  "reverses": "h-c37ad3aa1b16c6bdeb1933c77c9c0c630f95767b",
+  "dimensionType": "nenhuma",
+  "totals": {
+    "debitMinor": "324000",
+    "creditMinor": "324000"
+  },
+  "entries": [
+    {
+      "entryKey": "e-a788631a3103076bf76414544d59ba",
+      "accountKey": "DESP.FGTS",
+      "dimensionKey": null,
+      "debitMinor": "0",
+      "creditMinor": "24000",
+      "description": "Estorno: Folha de pagamento 10/2026"
+    },
+    {
+      "entryKey": "e-6d601966e2a7c8f0bc190941dc22af",
+      "accountKey": "DESP.SALARIOS",
+      "dimensionKey": null,
+      "debitMinor": "0",
+      "creditMinor": "300000",
+      "description": "Estorno: Folha de pagamento 10/2026"
+    },
+    {
+      "entryKey": "e-578dfaa8fe572ce33073c4d2876731",
+      "accountKey": "PASS.FGTS",
+      "dimensionKey": null,
+      "debitMinor": "24000",
+      "creditMinor": "0",
+      "description": "Estorno: Folha de pagamento 10/2026"
+    },
+    {
+      "entryKey": "e-84bacfa16d50b017cdee95e7568fa9",
+      "accountKey": "PASS.INSS_RETIDO",
+      "dimensionKey": null,
+      "debitMinor": "25000",
+      "creditMinor": "0",
+      "description": "Estorno: Folha de pagamento 10/2026"
+    },
+    {
+      "entryKey": "e-d5dbd886159947878ba7fda25c3d70",
+      "accountKey": "PASS.SALARIOS_A_PAGAR",
+      "dimensionKey": null,
+      "debitMinor": "275000",
+      "creditMinor": "0",
+      "description": "Estorno: Folha de pagamento 10/2026"
+    }
+  ],
+  "evidence": null,
+  "payloadHash": "6ad9dd8040a420df57e65ff04498e7da5db3c7d485ab22d25da29f7f3f563978",
+  "emittedAt": "2026-11-16T01:49:41Z",
+  "source": {
+    "repository": "pompiliodonatoapp/dnex-folha"
+  }
+}

@@ -1,0 +1,60 @@
+{
+  "contractVersion": "gestao.folha-handoff.v2",
+  "handoffKey": "h-d4727f10e9c26fd0761da17040bff84dbd7a78c1",
+  "accountId": "a0000000-0000-0000-0000-000000000030",
+  "employerId": "2cdcbdbe-4f1a-432e-8b83-ae44a0d26228",
+  "payrollRunId": "098bd293-06a3-43f8-aadc-769789000612",
+  "competence": "2026-10",
+  "eventType": "recolhimento_previdenciario",
+  "entryDate": "2026-11-20",
+  "version": 1,
+  "reverses": null,
+  "dimensionType": "nenhuma",
+  "totals": {
+    "debitMinor": "212900",
+    "creditMinor": "212900"
+  },
+  "entries": [
+    {
+      "entryKey": "e-4f9409ae2dab6c483a9aeeed91592f",
+      "accountKey": "PASS.INSS_RETIDO",
+      "dimensionKey": null,
+      "debitMinor": "60000",
+      "creditMinor": "0",
+      "description": "Recolhimento previdenciario 10/2026"
+    },
+    {
+      "entryKey": "e-f73b14bd2f9f9ce2b38af029158bbf",
+      "accountKey": "PASS.PREVIDENCIA",
+      "dimensionKey": null,
+      "debitMinor": "121000",
+      "creditMinor": "0",
+      "description": "Recolhimento previdenciario 10/2026"
+    },
+    {
+      "entryKey": "e-3667a38745c0574fb980ef4a73f870",
+      "accountKey": "PASS.TERCEIROS",
+      "dimensionKey": null,
+      "debitMinor": "31900",
+      "creditMinor": "0",
+      "description": "Recolhimento previdenciario 10/2026"
+    },
+    {
+      "entryKey": "e-82565d3e48bcffd3440029fbe94a1c",
+      "accountKey": "ATV.BANCO",
+      "dimensionKey": null,
+      "debitMinor": "0",
+      "creditMinor": "212900",
+      "description": "Recolhimento previdenciario 10/2026"
+    }
+  ],
+  "evidence": {
+    "date": "2026-11-20",
+    "reference": "GUIA-PREV-1"
+  },
+  "payloadHash": "add90c1caea35ae570a621e4eb70382ad8cd9a81e8690e527f2036381ed3612b",
+  "emittedAt": "2026-11-16T01:49:41Z",
+  "source": {
+    "repository": "pompiliodonatoapp/dnex-folha"
+  }
+}

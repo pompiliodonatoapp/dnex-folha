@@ -1,0 +1,73 @@
+{
+  "contractVersion": "gestao.folha-handoff.v2",
+  "handoffKey": "h-eef117cf280d0306212e3cf1ba7ea8eed874263b",
+  "accountId": "a0000000-0000-0000-0000-000000000030",
+  "employerId": "fa2181cb-719c-4ab8-a027-e89fb93b0094",
+  "payrollRunId": null,
+  "competence": "2026-10",
+  "eventType": "provisao_13o",
+  "entryDate": "2026-10-31",
+  "version": 1,
+  "reverses": null,
+  "dimensionType": "nenhuma",
+  "totals": {
+    "debitMinor": "40740",
+    "creditMinor": "40740"
+  },
+  "entries": [
+    {
+      "entryKey": "e-58917be9ecf2703ccbf7bc8cba5c49",
+      "accountKey": "DESP.13",
+      "dimensionKey": null,
+      "debitMinor": "30000",
+      "creditMinor": "0",
+      "description": "Provisao de 13o salario 10/2026"
+    },
+    {
+      "entryKey": "e-4b2f153aadec1077ed960f9df7e039",
+      "accountKey": "DESP.ENCARGOS_13",
+      "dimensionKey": null,
+      "debitMinor": "8340",
+      "creditMinor": "0",
+      "description": "Provisao de 13o salario 10/2026"
+    },
+    {
+      "entryKey": "e-c97b70c772cc481d39e86774605fbd",
+      "accountKey": "DESP.FGTS_13",
+      "dimensionKey": null,
+      "debitMinor": "2400",
+      "creditMinor": "0",
+      "description": "Provisao de 13o salario 10/2026"
+    },
+    {
+      "entryKey": "e-bbb10d68b9815ddff93ac4138e7226",
+      "accountKey": "PASS.PROV_13",
+      "dimensionKey": null,
+      "debitMinor": "0",
+      "creditMinor": "30000",
+      "description": "Provisao de 13o salario 10/2026"
+    },
+    {
+      "entryKey": "e-65ea8972036e1936a529c4406075a5",
+      "accountKey": "PASS.PROV_ENCARGOS_13",
+      "dimensionKey": null,
+      "debitMinor": "0",
+      "creditMinor": "8340",
+      "description": "Provisao de 13o salario 10/2026"
+    },
+    {
+      "entryKey": "e-a5d54c8440d7e2a2bf286aba7bbeec",
+      "accountKey": "PASS.PROV_FGTS_13",
+      "dimensionKey": null,
+      "debitMinor": "0",
+      "creditMinor": "2400",
+      "description": "Provisao de 13o salario 10/2026"
+    }
+  ],
+  "evidence": null,
+  "payloadHash": "27766f818f20bc7abbb5d732739ce647d12d893b046d84f85e1c6a3f77a5f17a",
+  "emittedAt": "2026-11-16T01:49:41Z",
+  "source": {
+    "repository": "pompiliodonatoapp/dnex-folha"
+  }
+}

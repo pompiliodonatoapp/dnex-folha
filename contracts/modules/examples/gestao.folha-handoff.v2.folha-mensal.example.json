@@ -1,0 +1,145 @@
+{
+  "contractVersion": "gestao.folha-handoff.v2",
+  "handoffKey": "h-7adf07f05aeccd05096bd7795b60eb72526f4766",
+  "accountId": "a0000000-0000-0000-0000-000000000030",
+  "employerId": "2cdcbdbe-4f1a-432e-8b83-ae44a0d26228",
+  "payrollRunId": "098bd293-06a3-43f8-aadc-769789000612",
+  "competence": "2026-10",
+  "eventType": "folha_mensal",
+  "entryDate": "2026-10-31",
+  "version": 1,
+  "reverses": null,
+  "dimensionType": "nenhuma",
+  "totals": {
+    "debitMinor": "746900",
+    "creditMinor": "746900"
+  },
+  "entries": [
+    {
+      "entryKey": "e-a788631a3103076bf76414544d59ba",
+      "accountKey": "DESP.FGTS",
+      "dimensionKey": null,
+      "debitMinor": "44000",
+      "creditMinor": "0",
+      "description": "Folha de pagamento 10/2026"
+    },
+    {
+      "entryKey": "e-3516562cf0fffb590db7d4bed77088",
+      "accountKey": "DESP.HORAS_EXTRAS",
+      "dimensionKey": null,
+      "debitMinor": "50000",
+      "creditMinor": "0",
+      "description": "Folha de pagamento 10/2026"
+    },
+    {
+      "entryKey": "e-42d57f26b114f2253c5830df38f994",
+      "accountKey": "DESP.INSS_PATRONAL",
+      "dimensionKey": null,
+      "debitMinor": "110000",
+      "creditMinor": "0",
+      "description": "Folha de pagamento 10/2026"
+    },
+    {
+      "entryKey": "e-3b5e2bad552e53835f92e1ce92f0e7",
+      "accountKey": "DESP.RAT",
+      "dimensionKey": null,
+      "debitMinor": "11000",
+      "creditMinor": "0",
+      "description": "Folha de pagamento 10/2026"
+    },
+    {
+      "entryKey": "e-6d601966e2a7c8f0bc190941dc22af",
+      "accountKey": "DESP.SALARIOS",
+      "dimensionKey": null,
+      "debitMinor": "500000",
+      "creditMinor": "0",
+      "description": "Folha de pagamento 10/2026"
+    },
+    {
+      "entryKey": "e-e9ffaadd8192db085ca14bfb426cd1",
+      "accountKey": "DESP.TERCEIROS",
+      "dimensionKey": null,
+      "debitMinor": "31900",
+      "creditMinor": "0",
+      "description": "Folha de pagamento 10/2026"
+    },
+    {
+      "entryKey": "e-990b5658b2755859857b4eb27b0e2c",
+      "accountKey": "ATV.ADIANTAMENTOS",
+      "dimensionKey": null,
+      "debitMinor": "0",
+      "creditMinor": "200000",
+      "description": "Folha de pagamento 10/2026"
+    },
+    {
+      "entryKey": "e-578dfaa8fe572ce33073c4d2876731",
+      "accountKey": "PASS.FGTS",
+      "dimensionKey": null,
+      "debitMinor": "0",
+      "creditMinor": "44000",
+      "description": "Folha de pagamento 10/2026"
+    },
+    {
+      "entryKey": "e-84bacfa16d50b017cdee95e7568fa9",
+      "accountKey": "PASS.INSS_RETIDO",
+      "dimensionKey": null,
+      "debitMinor": "0",
+      "creditMinor": "60000",
+      "description": "Folha de pagamento 10/2026"
+    },
+    {
+      "entryKey": "e-2bc2ca15d5a1e206205cd85e5a79ea",
+      "accountKey": "PASS.IRRF",
+      "dimensionKey": null,
+      "debitMinor": "0",
+      "creditMinor": "35000",
+      "description": "Folha de pagamento 10/2026"
+    },
+    {
+      "entryKey": "e-f956cdb26498119eab1b12d4c89b44",
+      "accountKey": "PASS.PENSAO",
+      "dimensionKey": null,
+      "debitMinor": "0",
+      "creditMinor": "80000",
+      "description": "Folha de pagamento 10/2026"
+    },
+    {
+      "entryKey": "e-1d9e3782bfd4de4dff57c92d104893",
+      "accountKey": "PASS.PREVIDENCIA",
+      "dimensionKey": null,
+      "debitMinor": "0",
+      "creditMinor": "121000",
+      "description": "Folha de pagamento 10/2026"
+    },
+    {
+      "entryKey": "e-d5dbd886159947878ba7fda25c3d70",
+      "accountKey": "PASS.SALARIOS_A_PAGAR",
+      "dimensionKey": null,
+      "debitMinor": "0",
+      "creditMinor": "145000",
+      "description": "Folha de pagamento 10/2026"
+    },
+    {
+      "entryKey": "e-3251cc747322792c053d3560cd07cf",
+      "accountKey": "PASS.TERCEIROS",
+      "dimensionKey": null,
+      "debitMinor": "0",
+      "creditMinor": "31900",
+      "description": "Folha de pagamento 10/2026"
+    },
+    {
+      "entryKey": "e-3581edc56c4b45386e000feb1a6a2d",
+      "accountKey": "RED.VT",
+      "dimensionKey": null,
+      "debitMinor": "0",
+      "creditMinor": "30000",
+      "description": "Folha de pagamento 10/2026"
+    }
+  ],
+  "evidence": null,
+  "payloadHash": "9d2506883746ab803ec1ef591ddb3ddc9832fd934f3ba0e41c6b6b9208911681",
+  "emittedAt": "2026-11-16T01:49:41Z",
+  "source": {
+    "repository": "pompiliodonatoapp/dnex-folha"
+  }
+}

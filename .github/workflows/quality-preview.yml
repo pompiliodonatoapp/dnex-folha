@@ -24,7 +24,9 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Validate folha handoff contract
+      # Valida os dois contratos: gestao.folha-handoff.v2 (vigente; esquema, exemplos e regras
+      # de partida fechada) e gestao.folha-handoff.v1 (superado; mantido para referência).
+      - name: Validate folha handoff contracts (v2 and superseded v1)
         shell: bash
         run: python3 scripts/validate_folha_handoff.py
       - name: Assert clean workspace

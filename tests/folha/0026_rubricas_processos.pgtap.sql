@@ -1171,9 +1171,13 @@ SELECT throws_like($$SELECT * FROM folha.dispatch_folha_completa(pg_temp.run('m1
   'Folha % está em draft e não pode ser despachada: só folha fechada gera eventos', 'NEG: folha em rascunho não é despachada');
 SELECT throws_like($$SELECT * FROM folha.dispatch_folha_completa(pg_temp.run('m10c'))$$,
   'Folha % está em calculated e não pode ser despachada: só folha fechada gera eventos', 'NEG: folha calculada com pendência não é despachada');
+-- Mudou com a migration 0030: o evento contábil deixou de ser um por resultado, com contas fixas
+-- no código. Sem configuração e mapeamento contábil do empregador (este arquivo não cadastra)
+-- o lote não sai e fica pendência de bloqueio: o contador contábil devolve 0. O despacho com
+-- mapeamento está no arquivo 0030.
 SELECT is(
   (SELECT d.esocial_events_dispatched::text || '/' || d.contabil_events_dispatched FROM folha.dispatch_folha_completa(pg_temp.run('m10b')) d),
-  '1/1', 'folha fechada e sem pendência aberta é despachada (um resultado)');
+  '1/0', 'folha fechada e sem pendência aberta é despachada (um resultado; sem mapeamento contábil, nenhum lote contábil)');
 SELECT ok(
   has_function_privilege('dnex_gestao_folha_worker', 'folha.dispatch_folha_completa(uuid)', 'execute')
   AND NOT has_function_privilege('anon', 'folha.dispatch_folha_completa(uuid)', 'execute')
