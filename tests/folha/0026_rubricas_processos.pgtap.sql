@@ -16,11 +16,15 @@ BEGIN;
 -- Conta da sessão pelo protocolo do gestao_auth, como nos arquivos 0023 a 0025.
 INSERT INTO gestao_finance.enterprise_scope_registry (account_id, legal_entity_id, branch_id)
 VALUES ('e0000000-0000-0000-0000-000000000027', 'e1000000-0000-0000-0000-000000000027', 'e2000000-0000-0000-0000-000000000027');
-INSERT INTO gestao_auth.access_assertion
-  (assertion_id, subject_id, subject_type, principal_group, runtime_session_user,
-   account_id, legal_entity_id, branch_id, permissions, issued_at, expires_at)
-VALUES ('aa000000-0000-0000-0000-000000000027', gen_random_uuid(), 'system', 'folha_worker', 'dnex_folha_ci_login',
-        'e0000000-0000-0000-0000-000000000027', 'e1000000-0000-0000-0000-000000000027', 'e2000000-0000-0000-0000-000000000027', ARRAY['folha.ci'], now(), now() + interval '4 minutes');
+-- Desde a migration 0028 a conta vem da claim da Folha (gestao_folha): o emissor registra a
+-- asserção com as cinco permissões e o login de teste, membro só de dnex_gestao_api, a consome.
+-- Esse login não tem GRANT nas tabelas da Folha; para o arquivo continuar a ler e gravar como
+-- o worker, recebe, só nesta transação, o espelho dos GRANTs do worker (tests/ci/bootstrap.sql,
+-- seção 6). Nenhum valor esperado mudou.
+DO $$ BEGIN
+  PERFORM dnex_folha_ci_apoio.emitir('aa000000-0000-0000-0000-000000000027', 'e0000000-0000-0000-0000-000000000027', 'e1000000-0000-0000-0000-000000000027', 'e2000000-0000-0000-0000-000000000027');
+  PERFORM dnex_folha_ci_apoio.espelhar_worker();
+END $$;
 -- Os indicadores booleanos da 0014 são legado: o motor lê o código de incidência. Desligados
 -- aqui (só nesta transação) para provar que o resultado de M1 não depende deles.
 UPDATE folha.earning_deduction_code
@@ -907,6 +911,10 @@ SELECT is_empty(
                        FROM unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE']) AS priv
                       WHERE has_table_privilege('dnex_gestao_folha_worker', 'folha.' || n.tabela, priv)), '') <> n.worker$$,
   'ACL: o worker tem exatamente os privilégios previstos em cada tabela nova');
+-- ACL conferida sem o espelho de CI (o login de teste não entra na ACL das migrations).
+RESET SESSION AUTHORIZATION;
+DO $$ BEGIN PERFORM dnex_folha_ci_apoio.desfazer_espelho(); END $$;
+SET LOCAL SESSION AUTHORIZATION dnex_folha_ci_login;
 SELECT is_empty(
   $$SELECT n.tabela || ' <- ' || CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE a.grantee::regrole::text END || ':' || a.privilege_type
       FROM novas n JOIN pg_class k ON k.oid = ('folha.' || n.tabela)::regclass,
@@ -915,6 +923,9 @@ SELECT is_empty(
        AND NOT (a.grantee = 'dnex_gestao_folha_worker'::regrole)
        AND NOT (a.grantee = 'dnex_gestao_data_owner'::regrole AND a.privilege_type = 'SELECT')$$,
   'ACL: fora o worker, só o data_owner, e só para leitura; nada para PUBLIC, anon, authenticated ou service_role');
+RESET SESSION AUTHORIZATION;
+DO $$ BEGIN PERFORM dnex_folha_ci_apoio.espelhar_worker(); END $$;
+SET LOCAL SESSION AUTHORIZATION dnex_folha_ci_login;
 
 -- Isolamento: dados de outra conta entram como superusuário e não são vistos nem alcançados.
 RESET SESSION AUTHORIZATION;
@@ -1005,6 +1016,10 @@ SELECT is_empty(
   $$SELECT acl.sig || ' <- ' || papel FROM acl, unnest(acl.papeis) AS papel
      WHERE NOT has_function_privilege(papel, to_regprocedure(acl.sig)::oid, 'execute')$$,
   'ACL: os papéis previstos executam');
+-- ACL conferida sem o espelho de CI (o login de teste não entra na ACL das migrations).
+RESET SESSION AUTHORIZATION;
+DO $$ BEGIN PERFORM dnex_folha_ci_apoio.desfazer_espelho(); END $$;
+SET LOCAL SESSION AUTHORIZATION dnex_folha_ci_login;
 SELECT is_empty(
   $$SELECT acl.sig || ' <- ' || CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE a.grantee::regrole::text END
       FROM acl JOIN pg_proc p ON p.oid = to_regprocedure(acl.sig)::oid,
@@ -1012,6 +1027,9 @@ SELECT is_empty(
      WHERE a.grantee <> p.proowner
        AND (a.grantee = 0 OR NOT (a.grantee::regrole::text = ANY (acl.papeis)))$$,
   'ACL: nenhum outro papel (nem PUBLIC) executa as funções das 0026 e 0027');
+RESET SESSION AUTHORIZATION;
+DO $$ BEGIN PERFORM dnex_folha_ci_apoio.espelhar_worker(); END $$;
+SET LOCAL SESSION AUTHORIZATION dnex_folha_ci_login;
 SELECT is_empty(
   $$SELECT acl.sig FROM acl JOIN pg_proc p ON p.oid = to_regprocedure(acl.sig)::oid
      WHERE p.prosecdef AND NOT EXISTS (SELECT 1 FROM unnest(p.proconfig) AS cfg WHERE cfg LIKE 'search_path=%')$$,

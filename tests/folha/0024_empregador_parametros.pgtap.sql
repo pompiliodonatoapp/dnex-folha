@@ -15,9 +15,14 @@
 --   4. executa os comandos e devolve o resultado do último como texto, ou
 --      'ERRO <sqlstate>: <mensagem>'.
 -- Nada do que como() grava persiste; o que precisa persistir é gravado no setup.
--- Papéis: dnex_folha_ci_login (login de teste, membro só do worker),
--- dnex_gestao_folha_worker (o de produção) e dnex_folha_ci (reserva de CI).
--- O grupo 'folha_worker' do protocolo existe só no bootstrap de CI (ver tests/ci/bootstrap.sql).
+-- Papéis: dnex_folha_ci_login (login de teste, membro só de dnex_gestao_api, como exige o
+-- contrato do contexto da Folha), dnex_gestao_folha_worker (NOLOGIN, titular dos GRANTs) e
+-- dnex_folha_ci (reserva de CI).
+-- Desde a migration 0028 a conta vem da claim da Folha (gestao_folha). O login de teste não
+-- tem GRANT nas tabelas: dentro de como(), e só ali (subtransação desfeita), ele recebe o
+-- espelho dos GRANTs do worker (tests/ci/bootstrap.sql, seção 6). Onde o texto dos testes
+-- diz "worker", leia "sessão com os privilégios do worker". O que mudou de esperado está
+-- marcado com "0028"; nenhum outro esperado mudou.
 -- Os valores e a chave de parâmetro deste arquivo são fictícios; nenhum é dado normativo.
 BEGIN;
 
@@ -35,6 +40,9 @@ DECLARE
   i integer;
 BEGIN
   BEGIN
+    IF p_login = 'dnex_folha_ci_login' THEN
+      PERFORM dnex_folha_ci_apoio.espelhar_worker();
+    END IF;
     IF p_login IS NOT NULL THEN
       EXECUTE format('SET LOCAL SESSION AUTHORIZATION %I', p_login);
     END IF;
@@ -73,17 +81,17 @@ BEGIN
 END
 $$;
 
--- Worker pelo protocolo real: login de teste + papel do worker + begin_request(asserção).
+-- Sessão pelo protocolo real: login de teste (grupo api) + begin_request(asserção com claim).
 CREATE FUNCTION pg_temp.w(p_assercao uuid, VARIADIC p_sql text[]) RETURNS text LANGUAGE sql AS $$
-  SELECT pg_temp.como('dnex_folha_ci_login', 'dnex_gestao_folha_worker', p_assercao, NULL, NULL, p_sql)
+  SELECT pg_temp.como('dnex_folha_ci_login', NULL, p_assercao, NULL, NULL, p_sql)
 $$;
 -- Worker pelo protocolo real, com o estado adulterado depois de begin_request.
 CREATE FUNCTION pg_temp.w_adulterado(p_assercao uuid, p_adultera text, VARIADIC p_sql text[]) RETURNS text LANGUAGE sql AS $$
-  SELECT pg_temp.como('dnex_folha_ci_login', 'dnex_gestao_folha_worker', p_assercao, p_adultera, NULL, p_sql)
+  SELECT pg_temp.como('dnex_folha_ci_login', NULL, p_assercao, p_adultera, NULL, p_sql)
 $$;
 -- Worker sem begin_request, só com parâmetros de sessão (o que um atacante consegue com SET).
 CREATE FUNCTION pg_temp.w_guc(p_gucs jsonb, VARIADIC p_sql text[]) RETURNS text LANGUAGE sql AS $$
-  SELECT pg_temp.como('dnex_folha_ci_login', 'dnex_gestao_folha_worker', NULL, NULL, p_gucs, p_sql)
+  SELECT pg_temp.como('dnex_folha_ci_login', NULL, NULL, NULL, p_gucs, p_sql)
 $$;
 -- Papel de teste com a reserva folha.account_id.
 CREATE FUNCTION pg_temp.ci(p_conta text, VARIADIC p_sql text[]) RETURNS text LANGUAGE sql AS $$
@@ -151,40 +159,47 @@ INSERT INTO folha.contract_tax_allocation (account_id, employer_id, contract_id,
 INSERT INTO folha.payroll_parameter (chave, valor, vigencia_inicio, vigencia_fim, fonte_normativa) VALUES
   ('parametro_teste', 1, '2026-01-01', '2026-12-31', 'fonte ficticia de teste');
 
--- Escopos empresariais (gestao_finance) e asserções (gestao_auth), gravados como o emissor
--- gravaria. Conta C existe só com escopo inativo.
+-- Escopos empresariais (gestao_finance). Conta C existe só com escopo inativo.
 INSERT INTO gestao_finance.enterprise_scope_registry (account_id, legal_entity_id, branch_id, status) VALUES
   (:A, 'a1000000-0000-0000-0000-000000000001', 'a2000000-0000-0000-0000-000000000001', 'active'),
   (:B, 'b1000000-0000-0000-0000-000000000002', 'b2000000-0000-0000-0000-000000000002', 'active'),
   ('c9000000-0000-0000-0000-000000000003', 'c1000000-0000-0000-0000-000000000003', 'c2000000-0000-0000-0000-000000000003', 'inactive');
 
+-- Asserções com claim da Folha, emitidas pelo caminho real (login emissor +
+-- gestao_folha.register_folha_assertion_v1). As situações negativas partem de uma asserção
+-- emitida e são adulteradas como superusuário; as duas que o emissor recusaria (grupo que não
+-- é o do login e escopo inativo) são gravadas direto.
+DO $$
+DECLARE
+  v_as uuid;
+BEGIN
+  FOREACH v_as IN ARRAY ARRAY[
+    'aa000000-0000-0000-0000-000000000001', 'aa000000-0000-0000-0000-000000000003',
+    'aa000000-0000-0000-0000-000000000004', 'aa000000-0000-0000-0000-000000000005',
+    'aa000000-0000-0000-0000-000000000006']::uuid[]
+  LOOP
+    PERFORM dnex_folha_ci_apoio.emitir(v_as, 'a0000000-0000-0000-0000-000000000001',
+      'a1000000-0000-0000-0000-000000000001', 'a2000000-0000-0000-0000-000000000001');
+  END LOOP;
+  PERFORM dnex_folha_ci_apoio.emitir('aa000000-0000-0000-0000-000000000002', 'b0000000-0000-0000-0000-000000000002',
+    'b1000000-0000-0000-0000-000000000002', 'b2000000-0000-0000-0000-000000000002');
+END $$;
+UPDATE gestao_auth.access_assertion
+   SET issued_at = now() - interval '10 minutes', expires_at = now() - interval '6 minutes'
+ WHERE assertion_id = :AS_EXPIRADA;
+UPDATE gestao_auth.access_assertion SET consumed_at = issued_at WHERE assertion_id = :AS_CONSUMIDA;
+UPDATE gestao_auth.access_assertion SET revoked_at = clock_timestamp() WHERE assertion_id = :AS_REVOGADA;
+UPDATE gestao_auth.access_assertion SET runtime_session_user = 'outro_login' WHERE assertion_id = :AS_OUTRO_LOGIN;
 INSERT INTO gestao_auth.access_assertion
   (assertion_id, subject_id, subject_type, principal_group, runtime_session_user,
    account_id, legal_entity_id, branch_id, permissions, issued_at, expires_at, consumed_at, revoked_at)
 VALUES
-  (:AS_A, gen_random_uuid(), 'system', 'folha_worker', 'dnex_folha_ci_login',
-   :A, 'a1000000-0000-0000-0000-000000000001', 'a2000000-0000-0000-0000-000000000001', ARRAY['folha.ci'],
+  -- 0028: o login de teste passou a ser do grupo api; o grupo "que não é o do login" é outro.
+  (:AS_GRUPO_API, gen_random_uuid(), 'system', 'fiscal_worker', 'dnex_folha_ci_login',
+   :A, 'a1000000-0000-0000-0000-000000000001', 'a2000000-0000-0000-0000-000000000001', ARRAY['integration.fiscal.ingest'],
    now(), now() + interval '4 minutes', NULL, NULL),
-  (:AS_B, gen_random_uuid(), 'system', 'folha_worker', 'dnex_folha_ci_login',
-   :B, 'b1000000-0000-0000-0000-000000000002', 'b2000000-0000-0000-0000-000000000002', ARRAY['folha.ci'],
-   now(), now() + interval '4 minutes', NULL, NULL),
-  (:AS_EXPIRADA, gen_random_uuid(), 'system', 'folha_worker', 'dnex_folha_ci_login',
-   :A, 'a1000000-0000-0000-0000-000000000001', 'a2000000-0000-0000-0000-000000000001', ARRAY['folha.ci'],
-   now() - interval '10 minutes', now() - interval '6 minutes', NULL, NULL),
-  (:AS_CONSUMIDA, gen_random_uuid(), 'system', 'folha_worker', 'dnex_folha_ci_login',
-   :A, 'a1000000-0000-0000-0000-000000000001', 'a2000000-0000-0000-0000-000000000001', ARRAY['folha.ci'],
-   now(), now() + interval '4 minutes', now(), NULL),
-  (:AS_REVOGADA, gen_random_uuid(), 'system', 'folha_worker', 'dnex_folha_ci_login',
-   :A, 'a1000000-0000-0000-0000-000000000001', 'a2000000-0000-0000-0000-000000000001', ARRAY['folha.ci'],
-   now(), now() + interval '4 minutes', NULL, now()),
-  (:AS_OUTRO_LOGIN, gen_random_uuid(), 'system', 'folha_worker', 'outro_login',
-   :A, 'a1000000-0000-0000-0000-000000000001', 'a2000000-0000-0000-0000-000000000001', ARRAY['folha.ci'],
-   now(), now() + interval '4 minutes', NULL, NULL),
-  (:AS_GRUPO_API, gen_random_uuid(), 'user', 'api', 'dnex_folha_ci_login',
-   :A, 'a1000000-0000-0000-0000-000000000001', 'a2000000-0000-0000-0000-000000000001', ARRAY['finance.read'],
-   now(), now() + interval '4 minutes', NULL, NULL),
-  (:AS_ESCOPO_INATIVO, gen_random_uuid(), 'system', 'folha_worker', 'dnex_folha_ci_login',
-   'c9000000-0000-0000-0000-000000000003', 'c1000000-0000-0000-0000-000000000003', 'c2000000-0000-0000-0000-000000000003', ARRAY['folha.ci'],
+  (:AS_ESCOPO_INATIVO, gen_random_uuid(), 'user', 'api', 'dnex_folha_ci_login',
+   'c9000000-0000-0000-0000-000000000003', 'c1000000-0000-0000-0000-000000000003', 'c2000000-0000-0000-0000-000000000003', ARRAY['finance.read'],
    now(), now() + interval '4 minutes', NULL, NULL);
 
 SET CONSTRAINTS ALL IMMEDIATE;   -- confere agora o rateio do setup (100 em cada contrato)
@@ -263,7 +278,7 @@ SELECT ok(
 );
 SELECT is(
   pg_temp.w(NULL, 'SELECT session_user || ''/'' || current_user'),
-  'dnex_folha_ci_login/dnex_gestao_folha_worker',
+  'dnex_folha_ci_login/dnex_folha_ci_login',   -- 0028: era .../dnex_gestao_folha_worker
   'o apoio dos testes troca de fato o session_user e o papel efetivo'
 );
 
@@ -445,14 +460,14 @@ SELECT is(
   'worker que abriu contexto com asserção da conta A: a conta é A'
 );
 SELECT is(
-  pg_temp.como('dnex_folha_ci_login', 'dnex_gestao_folha_worker', :AS_A,
+  pg_temp.como('dnex_folha_ci_login', NULL, :AS_A,
     'CREATE TEMP TABLE obs AS SELECT (SELECT consumed_at IS NOT NULL FROM gestao_auth.access_assertion WHERE assertion_id = ''aa000000-0000-0000-0000-000000000001'') AS consumida, (SELECT count(*) FROM gestao_auth.request_context WHERE context_nonce::text = current_setting(''dnex.context_nonce'') AND assertion_id = ''aa000000-0000-0000-0000-000000000001'') AS contextos, current_setting(''dnex.context_nonce'') <> ''aa000000-0000-0000-0000-000000000001'' AS nonce_difere; GRANT SELECT ON obs TO PUBLIC',
     NULL, ARRAY['SELECT consumida::text || ''/'' || contextos::text || ''/'' || nonce_difere::text FROM obs']),
   'true/1/true',
   'o protocolo exercido é o real: asserção consumida, nonce é a chave de request_context e não o assertion_id'
 );
 SELECT is(
-  pg_temp.como('dnex_folha_ci_login', 'dnex_gestao_folha_worker', :AS_A, NULL,
+  pg_temp.como('dnex_folha_ci_login', NULL, :AS_A, NULL,
     jsonb_build_object('folha.account_id', 'b0000000-0000-0000-0000-000000000002'),
     ARRAY['SELECT folha.current_account_id()::text || ''/'' || (SELECT count(*) FROM folha.employer WHERE account_id = ''b0000000-0000-0000-0000-000000000002'')']),
   'a0000000-0000-0000-0000-000000000001/0',
@@ -536,12 +551,12 @@ SELECT is(
     ('login que ganhou um segundo papel',
        'GRANT dnex_gestao_data_owner TO dnex_folha_ci_login'),
     ('grupo trocado para um que não é o do login',
-       'UPDATE gestao_auth.access_assertion SET principal_group = ''api'' WHERE assertion_id = ''aa000000-0000-0000-0000-000000000001''; UPDATE gestao_auth.request_context SET principal_group = ''api''')
+       'UPDATE gestao_auth.access_assertion SET principal_group = ''fiscal_worker'', subject_type = ''system'', permissions = ARRAY[''integration.fiscal.ingest''] WHERE assertion_id = ''aa000000-0000-0000-0000-000000000001''; UPDATE gestao_auth.request_context SET principal_group = ''fiscal_worker'', subject_type = ''system'', permissions = ARRAY[''integration.fiscal.ingest'']')
   ) AS x(caso, adultera);
 
 -- 6.4 O contexto não serve a outra sessão: aberto pelo login de teste, lido pelo superusuário
 SELECT is(
-  pg_temp.como('dnex_folha_ci_login', 'dnex_gestao_folha_worker', :AS_A, NULL, NULL,
+  pg_temp.como('dnex_folha_ci_login', NULL, :AS_A, NULL, NULL,
     ARRAY['RESET ROLE', 'RESET SESSION AUTHORIZATION',
           'SELECT (folha.request_context_account_id() IS NULL)::text || ''/'' || (session_user <> ''dnex_folha_ci_login'')::text || ''/'' || (current_setting(''dnex.context_nonce'') <> '''')::text']),
   'true/true/true',
@@ -586,7 +601,7 @@ SELECT is(
 -- a reserva não vale lá, nem para o papel de teste.
 CREATE FUNCTION public.folha_teste_conta_em_definer() RETURNS uuid
 LANGUAGE sql SECURITY DEFINER AS $$ SELECT folha.current_account_id() $$;
-GRANT EXECUTE ON FUNCTION public.folha_teste_conta_em_definer() TO dnex_folha_ci, dnex_gestao_folha_worker;
+GRANT EXECUTE ON FUNCTION public.folha_teste_conta_em_definer() TO dnex_folha_ci, dnex_gestao_folha_worker, dnex_folha_ci_login;
 SELECT is(
   pg_temp.ci('a0000000-0000-0000-0000-000000000001', 'SELECT public.folha_teste_conta_em_definer() IS NULL'),
   'true',
@@ -738,7 +753,7 @@ SELECT matches(
   ) AS x(caso, antes_do_commit);
 SELECT is(
   (SELECT prosecdef::text || '/' || array_to_string(proconfig, ',') FROM pg_proc WHERE oid = 'folha.validar_rateio_contrato()'::regprocedure),
-  'true/search_path=pg_catalog,row_security=off',
+  'true/search_path=pg_catalog, pg_temp,row_security=off',   -- 0028: search_path passou a terminar em pg_temp
   'a conferência do rateio é SECURITY DEFINER, com search_path fixo e sem RLS'
 );
 -- A corrida real entre duas conexões (a conferência serializa por contrato) está em
