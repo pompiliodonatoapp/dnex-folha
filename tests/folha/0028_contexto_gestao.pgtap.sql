@@ -206,7 +206,8 @@ SELECT is(
   (SELECT string_agg(p.oid::regprocedure::text, ',' ORDER BY p.oid::regprocedure::text)
      FROM pg_proc p WHERE p.pronamespace = 'folha'::regnamespace AND has_function_privilege('dnex_gestao_api', p.oid, 'execute')
       AND p.proname NOT LIKE 'portal\_%'     -- as do Portal (0029) são conferidas no arquivo 0029
-      AND p.proname NOT LIKE 'contabil\_%'), -- as da contabilização (0030) são conferidas no arquivo 0030
+      AND p.proname NOT LIKE 'contabil\_%'   -- as da contabilização (0030) são conferidas no arquivo 0030
+      AND p.proname NOT LIKE 'esocial\_%'),  -- as da fila do eSocial (0031) são conferidas no arquivo 0031
   (SELECT string_agg(sig, ',' ORDER BY sig) FROM acl WHERE papeis <> ARRAY[]::text[]),
   'dnex_gestao_api executa, no schema folha, exatamente as onze funções _v1 da 0028 (nenhuma das 0014 a 0027)');
 SELECT is_empty(
