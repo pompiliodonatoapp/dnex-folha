@@ -1,5 +1,27 @@
 # DNEX Folha — Status do Repositório
 
+## Frente 15/11/2026 (fatia 7a) — Migration 0031: fila de eventos do eSocial no banco
+
+Branch `feat/folha-fila-esocial-20261115`, PR em rascunho. Nada aplicado em produção nem no Supabase. Não gera XML, não transmite, não usa rede.
+**Não aplicar em produção**: depende do aceite da ADR `docs/02-decisoes/ADR-fila-esocial-banco.md`, das dependências das 0024 a 0030 e do gerador de XML (dnex-contador).
+
+### O que entrou
+Catálogo de 28 eventos e 37 antecessores (só o que o parecer sustenta; 8 códigos e 14 regras `a_validar`), evento com chave de negócio, versão, recibo e hash (máquina de 13 estados e 18 transições em tabela, conferida por gatilho), XML e retornos em tabela só de anexar, lote (até 50, um empregador, um grupo, fechamento em lote próprio), ocorrências, estrutura vazia do catálogo de rejeições, liberação de produção por empregador, fechamento e reabertura por ciclo (S-1299/S-1298), retificação e exclusão (S-3000) com recibo, folha fechada e sem pendência como condição, plano de DESFAZER em ordem (só leitura), visão e função de conferência. Dez funções `_v1` só para `dnex_gestao_api`.
+
+### Verificado em execução (PostgreSQL 17 + pgTAP em Docker local, banco recriado, roteiro de `tests/ci/replay.sh`, 0014 a 0031)
+2.238 asserções verdes: 0014=19, 0022=25, 0023=371, 0024=165, 0025=207, 0026=351, 0028=184, 0029=190, 0030=213, **0031=429**, dashboard=12, eventos_vida=47, golden=25; ciclo up -> down -> up (0028 a 0031) verde. A suíte anterior (1.809) não mudou valor esperado; só a contagem de policies da 0025 (41 para 48, por objetos novos) e o filtro de funções da 0028 (exclui `esocial_*`). Mutações feitas no teste (sem antecessor, folha aberta, idempotência, dependência do plano): detectadas.
+Não rodado localmente: `tests/ci/concorrencia_rateio.sh` (não tocado por esta migration).
+
+### Revisões independentes
+Duas rodadas somente leitura (SQL/segurança; aderência ao parecer e à ordem de dependências). Corrigido após a 1ª: S-3000 x retificação no mesmo alvo, reconferência de antecessores e período no envio, dependentes gerados/assinados bloqueiam exclusão, parâmetros do retorno processado, S-1298 exige `folha.close`, asserção vacuosa do plano. O restante está na ADR (pontos em aberto, item 9).
+
+### `a_validar`
+Códigos: S-2190, S-2205, S-2210, S-2220, S-2240, S-2300, S-2306, S-2399. Regras: 14 (ver `esocial_event_antecessor`). Grupos de lote do manual (1, 2, 3) x grupos do catálogo.
+
+### Não verificado
+Aplicação em ambiente real; concorrência real; desempenho do plano em empregador grande; integração com o gerador de XML e com `dispatch_folha_completa`.
+
+
 ## Frente 15/11/2026 (fatia 5) — Migration 0030: contabilização com partida fechada e provisões
 
 Branch `feat/folha-contabilizacao-20261115`, PR em rascunho. Nada aplicado em produção nem no Supabase.
