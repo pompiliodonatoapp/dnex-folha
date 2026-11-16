@@ -1,5 +1,57 @@
 # DNEX Folha — Status do Repositório
 
+## Frente 15/11/2026 (fatia 2b + Portal) — Migrations 0028 (contexto do gestao) e 0029 (banco do Portal v1)
+
+Branch `feat/folha-contexto-portal-20261115`, PR em rascunho. Nada aplicado em produção nem no Supabase.
+**Não aplicar em produção**: depende do schema `gestao_folha` (dnex-gestao, PR 144, candidata) e dos bloqueios abaixo.
+Decisão: `docs/02-decisoes/ADR-contexto-autorizacao-gestao.md` (proposta; aceite do proprietário pendente). Nomes finais para o Portal: `docs/CONTRATO-PORTAL.md`.
+
+### O que entrou
+
+- **0028:** a conta da sessão vem de `gestao_folha.require_folha_context_v1` (claim da Folha), por `folha.contexto_v1`; contexto `api` sem claim não recebe conta. Sessão de aplicação = login membro só de `dnex_gestao_api`, sem GRANT em tabela, operando por onze funções `folha.*_v1` (abrir, calcular contrato, concluir, liberar pendência, aprovar, fechar, cancelar, transmitir, segregação, dashboard, contexto), cada uma com a sua permissão. `dnex_gestao_folha_worker` deixa de ser caminho de sessão (NOLOGIN, titular dos GRANTs antigos). Subject do contexto gravado no cálculo, na liberação, na aprovação, no fechamento e na auditoria (por gatilho em folha e resultado). Segregação mínima opcional por conta, desligada por padrão. Despacho e geradores exigem `folha.transmit` e filtram pela conta. Lista de grupos `{api}`. `search_path` de todas as funções do schema que o fixam terminado em `pg_temp`.
+- **0029:** quatro tabelas do Portal, schema `portal_api` com as quatro funções do empregado (papel `authenticated`, `auth.uid()`), seis funções do escritório (`folha.portal_*_v1`). Publicação só de folha fechada, sem pendência, com resultado do trabalhador e tipo de processo compatível; caminho do arquivo preso a conta e trabalhador; documento imutável (só `publicado → retirado`).
+- **CI:** bootstrap reproduz o núcleo `gestao_auth` e inclui a candidata do gestao byte a byte (SHA-256 conferido); `replay.sh` executa o ciclo up, down, up das migrations 0028 em diante.
+
+### Bloqueios de produção (novos ou mantidos)
+
+0. **Falha de segurança no dnex-gestao (não corrigida, fora deste repositório):** as funções SECURITY DEFINER de `gestao_auth` têm `search_path` sem `pg_temp` no fim. Provado em teste local: com SQL livre no login de aplicação e uma asserção legítima de `folha.read`, troca-se de conta e ganham-se todas as permissões. A 0028 recusa aplicar enquanto isso existir (pré-condição 0.3.1); o bootstrap de CI corrige as cópias, como diferença declarada. Ver ADR.
+1. **Dono das funções sem EXECUTE em `require_folha_context_v1`**: a candidata do gestao só concede a `dnex_gestao_api`. Exige mudança no dnex-gestao (ADR, "Dono das funções"). No CI o dono é superusuário e isso não é exercido.
+2. **A sessão de aplicação não cadastra nem lê**: não há `_v1` para trabalhador, contrato, empregador, rubricas, lançamentos, nem leitura de folha, resultado e pendências. Fica para a fatia das telas.
+2.1. **Não existem o emissor da claim no Console, as rotas do Hub nem o login dedicado** (outros repositórios). Aplicar a 0028 sem eles deixa toda sessão sem conta, inclusive o caminho atual do Hub.
+3. **Entidade legal e filial do contexto não restringem** (só vão para a auditoria). Decisão do dono.
+4. **Funções criadas fora do repositório** (citadas na 0022: `build_esocial_s1210/s1299/s2299`, `build_reinf_r2010/r4010`, `dispatch_folha_completa(uuid, date)`) seguem, em produção, executáveis por `service_role` e pelo worker, sem contexto e sem filtro de conta.
+5. Portal: expor `portal_api` na API, bucket de armazenamento, prazo padrão de acesso e conferência de `auth.uid()` em produção são decisões e verificações pendentes (`docs/CONTRATO-PORTAL.md`, seção 6).
+6. Rotinas sem usuário não têm contexto (a claim só existe para subject `user`).
+7. Os bloqueios 3 a 5 da fatia 4 (abaixo) continuam. O bloqueio 1 de lá (autenticação pelo gestao) passa a ser os itens 0, 1 e 2.1 acima. O bloqueio 2 de lá (identidade em texto livre) e o 6 (despacho sem filtro de conta) foram fechados aqui para as funções deste repositório; o 7, em parte (reversão no CI).
+
+### Verificado em execução (PostgreSQL 17 + pgTAP em Docker local, banco recriado, `tests/ci/replay.sh`)
+
+- 1.596 asserções em 11 arquivos, todas verdes: 0014 (19), 0022 (25), 0023 (371), 0024 (165), 0025 (207), 0026 (351), **0028 (184)**, **0029 (190)**, dashboard (12), eventos de vida (47), dourados (25). Os nove anteriores somam as mesmas 1.222.
+- Ciclo down 0029, down 0028, up 0028, up 0029 e os dois arquivos novos de novo: verde. `pg_dump -s` depois das duas reversões é idêntico ao de um banco só até a 0027 (fora a linha de token do próprio pg_dump; conferido antes das correções da segunda rodada, que não mexeram nas reversões).
+- Lote: abrir + calcular 200 contratos + concluir num único pedido: 1,6 a 2,9 s (8 a 15 ms por contrato), contra 60 s da asserção. Cenário sintético (ver ADR).
+
+### Arquivos de teste anteriores tocados
+
+Nenhum valor esperado de cálculo mudou e a quantidade de asserções de cada arquivo é a mesma. Mudou:
+
+- **Apoio (0023, 0024, 0025, 0026, eventos de vida):** a asserção passa a ser emitida com claim da Folha pelo caminho real; o login de teste (membro só de `dnex_gestao_api`) recebe, dentro da transação, o espelho dos GRANTs do worker, desfeito em volta das conferências de ACL.
+- **Três esperados que não são de cálculo:** 0024, `session_user/current_user` do apoio (`…/dnex_gestao_folha_worker` → `…/dnex_folha_ci_login`: o login não assume mais o papel do worker); 0024, `search_path` de `validar_rateio_contrato` (ganhou `, pg_temp`); 0025, contagem de policies do schema (31 → 35: uma da 0028 e três da 0029).
+- **Fixtures com o mesmo esperado:** 0024, asserção "de grupo que não é o do login" e adulteração de grupo passam a usar `fiscal_worker` (o login agora é do grupo `api`), e a de escopo inativo passa a ser `user/api/finance.read` gravada direto, sem claim (o caso que discrimina cada vínculo da claim está no arquivo 0028); 0025, lista de grupos do cenário usa `api` no lugar de `folha_worker`.
+- Efeito colateral: a asserção dos arquivos antigos vale 55 s (o gestao recusa mais de 60), antes 4 minutos. O mais lento leva cerca de 4 s aqui.
+
+### Revisões independentes
+
+Duas, somente leitura (segurança/SQL; aderência aos contratos), em duas rodadas; a segunda foi sobre a versão corrigida da primeira. Primeira: crítico de `search_path` sem `pg_temp` (código do chamador rodando como dono), corrigido nas funções da Folha. Segunda: o mesmo defeito nas funções do `gestao_auth` (bloqueio 0, não corrigível daqui), o teste da isca que passava com o defeito presente (refeito, com âncora), pós-voo de `search_path` frouxo, corrida na janela de 60 s do registro de acesso, dois holerites da mesma folha (com e sem contrato), histórico contábil dependente de `DateStyle`, teste 6 do Portal que não provava o que dizia, e correções de texto nos documentos. **As correções da segunda rodada não passaram por uma terceira revisão.** O que ficou sem correção está nos bloqueios acima e nos dois documentos.
+
+### Não verificado
+
+- Produção e Supabase: nada foi lido nem aplicado. Não se sabe se o papel que aplica tem BYPASSRLS, se PUBLIC tem TEMP no banco, o default ACL, nem a definição real de `auth.uid()`.
+- Dono não superusuário (toda a suíte roda com dono superusuário).
+- PostgREST de verdade; concorrência em duas conexões para publicar, habilitar e aceitar.
+- Igualdade do insumo `0015_folha_context_candidate.sql` com o PR 144 (conferido só contra o commit `b0b98b1` da worktree do gestao).
+- Hub e API do Portal contra este banco.
+- **Pendência documental:** o vault `DNEX-Documentacao` não foi atualizado (a branch não está mesclada e a tarefa restringia a escrita a esta worktree).
+
 ## Frente 15/11/2026 (fatia 4) — Migrations 0026 e 0027: rubricas, bases, camadas, tipos de processo e trava
 
 Branch `feat/folha-rubricas-processos-20261115`, PR em rascunho. Nada aplicado em produção nem no Supabase.
