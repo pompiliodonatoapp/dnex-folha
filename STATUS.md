@@ -1,5 +1,26 @@
 # DNEX Folha — Status do Repositório
 
+## Frente 15/11/2026 (fatia 5) — Migration 0030: contabilização com partida fechada e provisões
+
+Branch `feat/folha-contabilizacao-20261115`, PR em rascunho. Nada aplicado em produção nem no Supabase.
+**Não aplicar em produção**: depende do aceite da ADR `docs/02-decisoes/ADR-contabilizacao-partida-fechada.md` e do cadastro do mapeamento contábil por empregador (sem mapeamento, nada é contabilizado).
+
+### O que entrou
+Mapeamento rubrica -> natureza -> conta configurável (vigência, escopo opcional), construtor por itens com partida fechada (CHECK + gatilho), provisões de férias e 13º em razão por trabalhador, pagamentos separados da apropriação, recálculo com estorno, contrato `gestao.folha-handoff.v2` (v1 superado), `v_reconciliacao_contabil` corrigida, 10 funções `_v1` só para `dnex_gestao_api`.
+
+### Verificado em execução (PostgreSQL 17 + pgTAP em Docker local, banco recriado, `tests/ci/replay.sh`, 0014 a 0030)
+1.809 asserções, todas verdes: 0014=19, 0022=25, 0023=371, 0024=165, 0025=207, 0026=351, 0028=184, 0029=190, 0030=213, dashboard=12, eventos_vida=47, golden=25; concorrência do rateio e ciclo up -> down -> up (0028 a 0030) verdes. A suíte anterior (1.596) não mudou valor esperado de cálculo; mudaram só contagens/listas por objetos novos (0023, 0025, 0028) e a contagem contábil das 0026/0028 (0, pois sem mapeamento não há lote).
+
+### Revisões independentes
+Duas rodadas somente leitura (contábil e SQL/segurança). Corrigido após a 1ª: hash compara a composição, recálculo com pagamento registrado é bloqueado, liberação de pendência trava o lote, TRUNCATE no outbox, unicidade de versão. Corrigido após a 2ª: ordem de locks da liberação (lote antes da pendência) e pagamento rejeitado/cancelado não bloqueia. A versão final dessas últimas correções foi só reexecutada no replay, sem 3ª revisão. Demais achados: pontos em aberto na ADR.
+
+### `a_validar`
+`contabil_provisao_encargos_incide_terco_ferias` e `contabil_rescisao_baixa_provisao_encargos`.
+
+### Não verificado
+Aplicação em ambiente real; concorrência de liberação/pagamento/recálculo; GC-06b; 13º parcelas.
+
+
 ## Frente 15/11/2026 (fatia 2b + Portal) — Migrations 0028 (contexto do gestao) e 0029 (banco do Portal v1)
 
 Branch `feat/folha-contexto-portal-20261115`, PR em rascunho. Nada aplicado em produção nem no Supabase.

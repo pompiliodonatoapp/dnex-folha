@@ -1,0 +1,57 @@
+{
+  "contractVersion": "gestao.folha-handoff.v2",
+  "handoffKey": "h-e05aa6991e97a55835a89894bbed9cd294b40315",
+  "accountId": "a0000000-0000-0000-0000-000000000030",
+  "employerId": "adae68d0-c43e-4e79-93f8-d31757748edf",
+  "payrollRunId": "485271e6-fe1e-4c56-b57e-e7a1af682158",
+  "competence": "2026-10",
+  "eventType": "folha_mensal",
+  "entryDate": "2026-10-31",
+  "version": 1,
+  "reverses": null,
+  "dimensionType": "centro_custo",
+  "totals": {
+    "debitMinor": "300000",
+    "creditMinor": "300000"
+  },
+  "entries": [
+    {
+      "entryKey": "e-b7a5fb38428d98467b75a36af8f079",
+      "accountKey": "CUSTO.MAO_DE_OBRA",
+      "dimensionKey": "PROD",
+      "debitMinor": "100000",
+      "creditMinor": "0",
+      "description": "Folha de pagamento 10/2026"
+    },
+    {
+      "entryKey": "e-e881f069b2dae0b636d6c600efa74b",
+      "accountKey": "DESP.SALARIOS",
+      "dimensionKey": "ADM",
+      "debitMinor": "200000",
+      "creditMinor": "0",
+      "description": "Folha de pagamento 10/2026"
+    },
+    {
+      "entryKey": "e-84bacfa16d50b017cdee95e7568fa9",
+      "accountKey": "PASS.INSS_RETIDO",
+      "dimensionKey": null,
+      "debitMinor": "0",
+      "creditMinor": "23000",
+      "description": "Folha de pagamento 10/2026"
+    },
+    {
+      "entryKey": "e-d5dbd886159947878ba7fda25c3d70",
+      "accountKey": "PASS.SALARIOS_A_PAGAR",
+      "dimensionKey": null,
+      "debitMinor": "0",
+      "creditMinor": "277000",
+      "description": "Folha de pagamento 10/2026"
+    }
+  ],
+  "evidence": null,
+  "payloadHash": "86d342b5cb9d65b4656a13a2404995e6ec27dc547b29ca737c5bffd7ce158361",
+  "emittedAt": "2026-11-16T01:49:41Z",
+  "source": {
+    "repository": "pompiliodonatoapp/dnex-folha"
+  }
+}

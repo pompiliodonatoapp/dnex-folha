@@ -1,8 +1,10 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://dnex.app.br/contracts/gestao.folha-handoff.v1.schema.json",
-  "title": "DNEX Folha Handoff v1",
-  "description": "Contrato de integração entre DNEX Folha (produto standalone) e DNEX Gestão. Eventos de contabilização de folha enviados ao subledger financeiro do Gestão.",
+  "title": "DNEX Folha Handoff v1 (superado)",
+  "description": "SUPERADO pelo gestao.folha-handoff.v2 (migration 0030): não comporta tipo de evento, data do lançamento, versão, estorno nem dimensão, e a Folha não emite mais eventos neste formato. Mantido no repositório para referência. Texto original: contrato de integração entre DNEX Folha (produto standalone) e DNEX Gestão. Eventos de contabilização de folha enviados ao subledger financeiro do Gestão.",
+  "deprecated": true,
+  "x-superseded-by": "gestao.folha-handoff.v2",
   "type": "object",
   "required": ["contractVersion", "handoffKey", "accountId", "payrollRunId", "competence", "emittedAt", "entries"],
   "properties": {

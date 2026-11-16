@@ -558,6 +558,9 @@ SELECT is(
 -- Lista do catálogo inteiro. Mudou com a migration 0025: irrf_redutor_coef_a e irrf_redutor_coef_b
 -- passaram a 'validado' (o parecer de INSS/FGTS conferiu os coeficientes na Lei 15.270/2025) e
 -- entraram inss_arredondamento_metodo e terceiros_incide_contribuinte_individual (a_validar).
+-- Mudou com a migration 0030: entraram os dois parâmetros da contabilização que o parecer
+-- contábil não fecha (contabil_provisao_encargos_incide_terco_ferias e
+-- contabil_rescisao_baixa_provisao_encargos), ambos a_validar.
 SELECT set_eq(
   $$SELECT chave FROM folha.payroll_parameter WHERE status_validacao = 'a_validar'$$,
   ARRAY['divisor_variaveis_quitacao', 'divisor_variaveis_ajuste', 'ferias_fracionamento_max_periodos',
@@ -565,7 +568,8 @@ SELECT set_eq(
         'irrf_dobra_ferias_incide', 'irrf_redutor_referencia_bruto',
         'aviso_previo_dias_por_ano', 'prazo_pagamento_rescisao_dias', 'divisor_saldo_salario',
         'inss_aviso_indenizado_incide', 'inss_projecao_aviso_incide',
-        'inss_arredondamento_metodo', 'terceiros_incide_contribuinte_individual'],
+        'inss_arredondamento_metodo', 'terceiros_incide_contribuinte_individual',
+        'contabil_provisao_encargos_incide_terco_ferias', 'contabil_rescisao_baixa_provisao_encargos'],
   'Parâmetros: o que os pareceres marcam A VALIDAR NA FONTE está como a_validar');
 SELECT throws_ok($$SELECT folha.get_param('parametro_inexistente', '2026-01-01')$$,
   'P0001', NULL, 'get_param: parâmetro ausente levanta exceção (sem valor de reserva)');
