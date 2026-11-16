@@ -311,19 +311,22 @@ DROP TABLE folha.provision_entitlement;
 DROP TABLE folha.provision_movement_type;
 DROP TABLE folha.contabil_pendencia;
 DROP FUNCTION folha.provision_ledger_trava();
-DROP FUNCTION folha.contabil_sem_truncate();
 
 -- ---------------------------------------------------------------------------
 -- 5. Outbox contábil: volta à forma da 0018
 -- ---------------------------------------------------------------------------
 DROP TRIGGER trg_accounting_outbox_guarda ON folha.accounting_outbox;
 DROP TRIGGER trg_accounting_outbox_imutavel ON folha.accounting_outbox;
+DROP TRIGGER trg_accounting_outbox_sem_truncate ON folha.accounting_outbox;
+DROP FUNCTION folha.contabil_sem_truncate();
 DROP FUNCTION folha.accounting_outbox_guarda();
 DROP FUNCTION folha.accounting_outbox_imutavel();
 DROP FUNCTION folha.contabil_payload_hash(jsonb);
 
 DROP INDEX folha.accounting_outbox_vigente_folha_key;
 DROP INDEX folha.accounting_outbox_vigente_provisao_key;
+DROP INDEX folha.accounting_outbox_versao_folha_key;
+DROP INDEX folha.accounting_outbox_versao_provisao_key;
 DROP INDEX folha.accounting_outbox_estorna_key;
 DROP INDEX folha.accounting_outbox_comprovante_key;
 DROP INDEX folha.idx_accounting_outbox_run;

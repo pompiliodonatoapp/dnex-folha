@@ -384,6 +384,12 @@ CREATE UNIQUE INDEX accounting_outbox_vigente_provisao_key
   ON folha.accounting_outbox (account_id, employer_id, competencia, evento_tipo)
   WHERE formato = 'v2' AND vigente AND evento_tipo IN ('provisao_ferias', 'provisao_13o');
 -- Um estorno por lote estornado; um lote por comprovante e tipo de pagamento.
+CREATE UNIQUE INDEX accounting_outbox_versao_folha_key
+  ON folha.accounting_outbox (account_id, run_id, employer_id, evento_tipo, versao)
+  WHERE formato = 'v2' AND evento_tipo IN ('folha_mensal', 'folha_complementar', 'adiantamento_salarial', 'decimo_terceiro', 'ferias', 'rescisao', 'pro_labore');
+CREATE UNIQUE INDEX accounting_outbox_versao_provisao_key
+  ON folha.accounting_outbox (account_id, employer_id, competencia, evento_tipo, versao)
+  WHERE formato = 'v2' AND evento_tipo IN ('provisao_ferias', 'provisao_13o');
 CREATE UNIQUE INDEX accounting_outbox_estorna_key
   ON folha.accounting_outbox (account_id, estorna_outbox_id) WHERE estorna_outbox_id IS NOT NULL;
 CREATE UNIQUE INDEX accounting_outbox_comprovante_key
@@ -716,6 +722,9 @@ END
 $function$;
 CREATE TRIGGER trg_provision_ledger_sem_truncate
   BEFORE TRUNCATE ON folha.provision_ledger
+  FOR EACH STATEMENT EXECUTE FUNCTION folha.contabil_sem_truncate();
+CREATE TRIGGER trg_accounting_outbox_sem_truncate
+  BEFORE TRUNCATE ON folha.accounting_outbox
   FOR EACH STATEMENT EXECUTE FUNCTION folha.contabil_sem_truncate();
 
 -- ===========================================================================
@@ -1608,9 +1617,21 @@ BEGIN
   END IF;
 
   IF v_tem_atual THEN
-    IF NOT v_vazio AND v_atual.payload_hash = (v_payload->>'payloadHash') AND v_atual.status <> 'rejeitado' THEN
+    IF NOT v_vazio AND v_atual.payload_hash = (v_payload->>'payloadHash') AND v_atual.status <> 'rejeitado'
+       AND v_atual.composicao IS NOT DISTINCT FROM (p_lote->'composicao') THEN
       RETURN jsonb_build_object('evento_tipo', v_evento, 'situacao', 'inalterado', 'outbox_id', v_atual.outbox_id,
                                 'versao', v_atual.versao, 'status', v_atual.status, 'inseridos', 0);
+    END IF;
+    IF v_run IS NOT NULL AND v_evento IN ('folha_mensal', 'folha_complementar', 'adiantamento_salarial', 'decimo_terceiro', 'ferias', 'rescisao', 'pro_labore')
+       AND EXISTS (SELECT 1 FROM folha.accounting_outbox pg
+                    WHERE pg.account_id = p_conta AND pg.run_id = v_run AND pg.employer_id = v_employer
+                      AND pg.formato = 'v2' AND pg.vigente
+                      AND pg.status IN ('retido', 'pendente', 'despachado', 'confirmado')
+                      AND pg.evento_tipo IN ('pagamento_liquido', 'recolhimento_previdenciario', 'recolhimento_irrf', 'fgts_deposito', 'repasse_terceiros')) THEN
+      RAISE EXCEPTION USING ERRCODE = 'FC001',
+        MESSAGE = 'Contabilização bloqueada: a folha já tem pagamento contabilizado; o recálculo mudaria a apropriação e deixaria saldo de passivo negativo',
+        DETAIL = jsonb_build_object('codigo', 'pagamento_registrado', 'evento_tipo', v_evento, 'employer_id', v_employer,
+                                    'run_id', v_run, 'competencia', v_comp)::text;
     END IF;
     IF v_atual.status IN ('retido', 'pendente') THEN
       UPDATE folha.accounting_outbox o
@@ -2241,8 +2262,8 @@ END
 $function$;
 
 -- 8.6 Informar o direito de provisão do contrato na competência (folha.calculate). Não aceita
---     mudança depois que a provisão da competência saiu: a correção é pela competência seguinte
---     (o método do saldo corrige o estoque) ou refazendo a constituição da própria competência.
+--     A mudança é aceita (fica na auditoria): a constituição da competência é refeita pela regra
+--     V7 (lote substituído ou estornado) e o método do saldo corrige o estoque nas seguintes.
 CREATE FUNCTION folha.contabil_provisao_direito_informar_v1(
   p_contract_id uuid, p_competencia date, p_remuneracao_base numeric, p_avos_13 numeric, p_avos_ferias numeric
 ) RETURNS void
@@ -2556,6 +2577,12 @@ BEGIN
   IF btrim(COALESCE(p_motivo, '')) = '' THEN
     RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'contabil_pendencia_liberar_v1: motivo obrigatório';
   END IF;
+  -- Ordem de locks igual à de contabil_lote_publicar: primeiro o lote, depois a pendência.
+  PERFORM 1 FROM folha.accounting_outbox o
+   WHERE o.account_id = v_ctx.account_id
+     AND o.outbox_id = (SELECT p.outbox_id FROM folha.contabil_pendencia p
+                         WHERE p.pendencia_id = p_pendencia_id AND p.account_id = v_ctx.account_id)
+     FOR UPDATE;
   SELECT p.pendencia_id, p.tipo, p.codigo, p.outbox_id, p.liberada_em, p.resolvida_em INTO v_p
     FROM folha.contabil_pendencia p
    WHERE p.pendencia_id = p_pendencia_id AND p.account_id = v_ctx.account_id

@@ -22,7 +22,7 @@
 -- Nomes, CPFs e inscrições são fictícios. Nada é persistido (ROLLBACK no final).
 BEGIN;
 
-SELECT plan(210);
+SELECT plan(213);
 
 \set A '''a0000000-0000-0000-0000-000000000030'''
 \set B '''b0000000-0000-0000-0000-000000000030'''
@@ -899,6 +899,17 @@ SELECT is(
   (SELECT v.situacao || '/' || v.soma_proventos || '/' || v.contabil_proventos_minor FROM folha.v_reconciliacao_contabil v WHERE v.run_id = pg_temp.id('r02')),
   'aguardando_confirmacao/5500.00/550000',
   'E13: com seis lotes na folha a soma da reconciliação continua 5500,00 (a visão antiga multiplicava pelo número de eventos)');
+-- Derivado: recálculo de folha que já tem pagamento contabilizado é bloqueado (o saldo do passivo
+-- ficaria negativo); nada é gravado e fica pendência de bloqueio.
+SELECT pg_temp.resultado('r02', 'c02',
+  'SALARIO_BASE=500100,HE_50=50000,INSS_EMPREGADO=60000,IRRF=35000,VALE_TRANSPORTE=30000,PENSAO_ALIMENTICIA=80000,ADIANTAMENTO_SALARIAL=200000,FGTS_DEPOSITO=44000',
+  'INSS_PATRONAL=110000,RAT_SAT=11000,TERCEIROS=31900');
+INSERT INTO saida VALUES ('r02pag', pg_temp.contabiliza('r02'));
+SELECT is((SELECT (v::jsonb->>'situacao') || '/' || (v::jsonb->'pendencias'->0->>'codigo') FROM saida WHERE k = 'r02pag'),
+  'bloqueada/pagamento_registrado', 'derivado: recálculo com pagamento já contabilizado é bloqueado (pagamento_registrado)');
+SELECT is((SELECT count(*) FROM folha.accounting_outbox o WHERE o.run_id = pg_temp.id('r02')), 6::bigint,
+  'derivado: o bloqueio por pagamento não gravou lote nenhum (seguem seis)');
+SELECT throws_ok($$TRUNCATE folha.accounting_outbox CASCADE$$, '23514', NULL, 'derivado: o outbox contábil não aceita TRUNCATE');
 
 -- ===========================================================================
 -- 7. GC-05 — Pró-labore
