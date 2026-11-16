@@ -1325,13 +1325,13 @@ SELECT matches(pg_temp.retif('rx_a6', 'a6', 'a6-v2', 'retificação com exclusã
   'retificar evento que tem S-3000 aberto: recusado (os dois retornos aceitos travariam o lote)');
 SELECT pg_temp.ok_(pg_temp.tx_a(format('SELECT folha.esocial_evento_cancelar_v1(%L::uuid, ''desistência'')::text', pg_temp.id('s3000_a6'))), 'S-3000 cancelado');
 SELECT pg_temp.ok_(pg_temp.retif('rx_a6', 'a6', 'a6-v2', 'retificação sem exclusão aberta'), 'agora a retificação é aceita');
-SELECT matches(pg_temp.excl('s3000_a6b', 'a6', 'exclusão com retificação aberta'), '^ERRO 55000: Há versão deste evento em andamento|^ERRO 55000: Há retificação em andamento',
+SELECT matches(pg_temp.excl('s3000_a6b', 'a6', 'exclusão com retificação aberta'), '^ERRO 55000: Há versão deste evento em andamento',
   'excluir evento com retificação aberta: recusado');
+SELECT matches(pg_temp.retorno('L_x3', 'recebido', 'PROT-X3', '201', '[]'::jsonb, jsonb_build_array(pg_temp.res('x_s1020', 'validado', 'R'))), '^ERRO 22023: Resultados por evento só no retorno processado',
+  'resultado de evento fora do retorno processado: recusado');
 SELECT pg_temp.ok_(pg_temp.retorno('L_x3', 'recebido', 'PROT-X3', '201'), 'e2: lote do S-1020 recebido');
 SELECT matches(pg_temp.retorno('L_x3', 'processado', 'PROT-QUALQUER'), '^ERRO 22023: No retorno processado, protocolo, código e ocorrências do lote não se aplicam',
   'retorno processado com protocolo do lote: recusado (nada descartado em silêncio)');
-SELECT matches(pg_temp.retorno('L_x3', 'recebido', 'PROT-X3', '201', '[]'::jsonb, jsonb_build_array(pg_temp.res('x_s1020', 'validado', 'R'))), '^ERRO 55000: |^ERRO 22023: ',
-  'resultado de evento fora do retorno processado: recusado');
 SELECT pg_temp.ok_(pg_temp.retorno('L_x3', 'processado', NULL, NULL, '[]'::jsonb, jsonb_build_array(pg_temp.res('x_s1020', 'validado', 'REC-X1020'))), 'e2: S-1020 validado');
 SELECT pg_temp.ok_(pg_temp.passo('x_s2200', 'gerado', '<x2200/>'), 'e2: S-2200 do c3 gerado (agora com S-1000, S-1005 e S-1020 validados)');
 SELECT pg_temp.ok_(pg_temp.passo('x_s2200', 'assinado', '<x2200 sig="1"/>'), 'e2: S-2200 do c3 assinado (ainda não enviado)');

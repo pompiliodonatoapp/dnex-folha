@@ -34,7 +34,7 @@
 --
 -- PERMISSÃO POR OPERAÇÃO (protocolo da 0028)
 --   folha.read      esocial_desfazer_plano_v1, esocial_conferencia_v1
---   folha.transmit  esocial_evento_enfileirar_v1, esocial_evento_avancar_v1, esocial_evento_cancelar_v1,
+--   folha.transmit  esocial_evento_enfileirar_v1 (S-1298 também exige folha.close), esocial_evento_avancar_v1, esocial_evento_cancelar_v1,
 --                   esocial_lote_enviar_v1, esocial_lote_retorno_v1 (e todo UPDATE/INSERT nas tabelas)
 --   folha.transmit + folha.close   esocial_evento_retificar_v1, esocial_evento_excluir_v1
 --                   (parecer 4.9: quem aprova retificação e exclusão é papel distinto de quem prepara);
