@@ -128,3 +128,15 @@ jobs:
         run: |
           chmod +x tests/ci/replay.sh
           tests/ci/replay.sh
+
+      # Contrato de entrada dos geradores de XML do eSocial (migration 0032): roda o cenário sintético
+      # (tests/ci/entrada_eventos_sintetico.sql) no mesmo banco, já com as migrations 0014 a 0032, e valida a
+      # entrada de cada função folha.esocial_entrada_*_v1 contra o JSON Schema copiado do dnex-contador
+      # (contracts/esocial/entrada-evento.schema.json, com origem e hash). Sem rede, sem segredo e sem
+      # dependência: o Node que já vem no runner basta (validador próprio, estrito e com autoteste).
+      - name: Verify eSocial entrada contract (JSON Schema)
+        shell: bash
+        run: |
+          node --version
+          node scripts/validar_entrada_eventos.mjs --self-test
+          node scripts/validar_entrada_eventos.mjs
