@@ -1,5 +1,23 @@
 # DNEX Folha — Status do Repositório
 
+## Frente 18/11/2026 — Migration 0032: entrada dos geradores de XML do eSocial
+
+Branch `feat/folha-entrada-eventos-20261118`, PR em rascunho. Nada aplicado em produção nem no Supabase. Não gera XML, não assina, não transmite, não usa rede.
+**Não aplicar em produção**: depende do aceite da ADR `docs/02-decisoes/ADR-entrada-eventos-esocial.md` e da revisão do DP e do jurídico.
+
+### O que entrou
+Cadastro que faltava (empregador por vigência, estabelecimento, lotação, rubrica por empregador, trabalhador, dependentes, vínculo, desligamento por código), tabelas oficiais como estrutura (55 códigos lidos dos XSD, com arquivo e linha; as Tabelas 01, 03, 07, 08, 10, 19 e 21 vazias), demonstrativo (`ideDmDev`), pagamento efetivo e registro das entradas. Onze funções `esocial_entrada_*_v1` (S-1000, S-1005, S-1010, S-1020 em inclusão, S-1200, S-1210, S-2200, S-1298, S-1299, S-3000 e o registro de pagamento). Contrato de saída conferido no CI por `scripts/validar_entrada_eventos.mjs` contra a cópia do JSON Schema do gerador.
+
+### Verificado em execução (PostgreSQL 17 + pgTAP em Docker local, `tests/ci/replay.sh`, 0014 a 0032)
+2.523 asserções verdes: as 2.238 anteriores (0014=19, 0022=25, 0023=371, 0024=165, 0025=207, 0026=351, 0028=184, 0029=190, 0030=213, 0031=429, dashboard=12, eventos_vida=47, golden=25) mais **0032=285**; ciclo up -> down -> up (0028 a 0032) verde. Esperado de comportamento das suítes anteriores não mudou; mudaram só a contagem de policies da 0025 (48 para 58) e, na 0031, o filtro de funções `esocial_*` e o privilégio de TRUNCATE em cascata. Verificação do contrato: 16 resultados do cenário sintético, 12 prontos validados no JSON Schema, 33 exemplos do gerador aceitos pelo validador.
+Observado uma vez, sem relação com a 0032 e não reproduzido (6 repetições isoladas passaram): o teste 0029 falhou na revogação por asserção expirada.
+
+### Fora desta entrega
+S-2299 (só o cadastro), alteração/exclusão das tabelas, 13º e rescisão no S-1200/S-1210, `infoMV`, `infoIRComplem`, rateio por lotação. Rodar o gerador TypeScript sobre as entradas prontas (regras de leiaute além da forma). Ver a ADR.
+
+### Não verificado
+Aplicação em ambiente real e com dono não superusuário; concorrência real; execução do passo novo no runner do GitHub; as regras do leiaute do gerador sobre as saídas.
+
 ## Frente 15/11/2026 (fatia 7a) — Migration 0031: fila de eventos do eSocial no banco
 
 Branch `feat/folha-fila-esocial-20261115`, PR em rascunho. Nada aplicado em produção nem no Supabase. Não gera XML, não transmite, não usa rede.
