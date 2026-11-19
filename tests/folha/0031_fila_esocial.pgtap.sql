@@ -379,6 +379,7 @@ INSERT INTO acl VALUES
 SELECT is_empty($$SELECT acl.sig FROM acl WHERE to_regprocedure(acl.sig) IS NULL$$, 'todas as funções esperadas existem com a assinatura exata');
 SELECT is(
   (SELECT count(*) FROM pg_proc p WHERE p.pronamespace = 'folha'::regnamespace AND p.proname LIKE 'esocial\_%'
+      AND p.proname NOT LIKE 'esocial\_entrada\_%' AND p.proname NOT LIKE 'esocial\_dominio\_%'   -- as da 0032 são conferidas no arquivo 0032
       AND p.oid::regprocedure::text NOT IN (SELECT sig FROM acl)),
   0::bigint, 'não há função esocial_* fora da lista (nenhuma sobra sem ACL conferida)');
 SELECT is_empty(
@@ -395,7 +396,7 @@ SELECT is_empty(
 SELECT is(
   (SELECT string_agg(p.oid::regprocedure::text, ',' ORDER BY p.oid::regprocedure::text)
      FROM pg_proc p WHERE p.pronamespace = 'folha'::regnamespace AND has_function_privilege('dnex_gestao_api', p.oid, 'execute')
-      AND p.proname LIKE 'esocial\_%'),
+      AND p.proname LIKE 'esocial\_%' AND p.proname NOT LIKE 'esocial\_entrada\_%'),   -- as da 0032 são conferidas no arquivo 0032
   (SELECT string_agg(sig, ',' ORDER BY sig) FROM acl WHERE papeis = ARRAY['dnex_gestao_api']),
   'dnex_gestao_api executa, da fila do eSocial, exatamente as dez funções _v1');
 SELECT is_empty(
@@ -1075,6 +1076,8 @@ SELECT matches(pg_temp.tx_a(format('SELECT folha.esocial_evento_cancelar_v1(%L::
 SELECT pg_temp.ok_(pg_temp.enf('d1', 'e1', 'S-2230', 'producao_restrita', 'd1', pg_temp.rvinc('c1', '2026-05-08')), 'S-2230 d1 enfileirado (rascunho)');
 GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON folha.esocial_event, folha.esocial_lot, folha.esocial_lot_event, folha.esocial_event_payload,
   folha.esocial_event_occurrence, folha.esocial_event_origin, folha.esocial_employer_setting TO dnex_folha_ci_login;
+-- a 0032 tem tabela que referencia esocial_event: o TRUNCATE ... CASCADE alcança a tabela e pede o privilégio nela
+GRANT TRUNCATE ON folha.esocial_entrada TO dnex_folha_ci_login;
 -- Com a RLS só de leitura o login de teste não escreve (nem os gatilhos disparariam): para exercer os gatilhos
 -- por DML direto ele ganha, só aqui e dentro da transação do teste, uma policy de escrita em cada tabela.
 DO $$
@@ -1181,6 +1184,7 @@ END
 $$;
 REVOKE ALL ON folha.esocial_event, folha.esocial_lot, folha.esocial_lot_event, folha.esocial_event_payload,
   folha.esocial_event_occurrence, folha.esocial_event_origin, folha.esocial_employer_setting FROM dnex_folha_ci_login;
+REVOKE ALL ON folha.esocial_entrada FROM dnex_folha_ci_login;
 SELECT is_empty(
   $$SELECT k.relname FROM pg_class k WHERE k.relnamespace = 'folha'::regnamespace AND k.relname LIKE 'esocial\_%' AND k.relkind = 'r'
       AND (has_table_privilege('dnex_folha_ci_login', k.oid, 'UPDATE') OR has_table_privilege('dnex_folha_ci_login', k.oid, 'INSERT'))$$,

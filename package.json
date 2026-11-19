@@ -1,0 +1,13 @@
+{
+  "name": "dnex-folha",
+  "private": true,
+  "type": "module",
+  "description": "Scripts de verificacao do DNEX Folha (sem dependencias; nada e instalado).",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "validar:entrada": "node scripts/validar_entrada_eventos.mjs",
+    "validar:entrada:autoteste": "node scripts/validar_entrada_eventos.mjs --self-test"
+  }
+}
