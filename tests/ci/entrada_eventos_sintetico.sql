@@ -106,8 +106,8 @@ LANGUAGE plpgsql AS $$
 DECLARE
   v_emp uuid; v_est uuid; v_lot uuid;
 BEGIN
-  INSERT INTO folha.employer (account_id, tipo_inscricao, inscricao, razao_social, classificacao_tributaria)
-  VALUES (p_conta, 'cnpj', p_cnpj, 'Empresa Sintetica ' || p_k, NULL) RETURNING employer_id INTO v_emp;
+  INSERT INTO folha.employer (account_id, tipo_inscricao, inscricao, razao_social, classificacao_tributaria, natureza_juridica)
+  VALUES (p_conta, 'cnpj', p_cnpj, 'Empresa Sintetica ' || p_k, NULL, '206-2') RETURNING employer_id INTO v_emp;
   INSERT INTO folha.employer_regime (account_id, employer_id, vigencia_inicio, regime_tributario)
   VALUES (p_conta, v_emp, '2024-01-01', 'lucro_presumido');
   INSERT INTO folha.establishment (account_id, employer_id, tipo_inscricao, inscricao, cnae_preponderante)
@@ -125,8 +125,8 @@ BEGIN
     VALUES (p_conta, v_est, '2026-01-01', '2026-10-01', 2);
     INSERT INTO folha.tax_allocation_detail (account_id, allocation_id, vigencia_inicio, vigencia_fim, fpas, codigo_terceiros)
     VALUES (p_conta, v_lot, '2026-01-01', '2026-10-31', '507', '0000');
-    INSERT INTO folha.rubric_esocial_config (account_id, employer_id, code_id, cod_rubr, ide_tab_rubr, vigencia_inicio)
-    SELECT p_conta, v_emp, c.code_id, x.cod_rubr, 'DNEX01', '2026-01-01'
+    INSERT INTO folha.rubric_esocial_config (account_id, employer_id, code_id, cod_rubr, ide_tab_rubr, vigencia_inicio, ind_apur_ir)
+    SELECT p_conta, v_emp, c.code_id, x.cod_rubr, 'DNEX01', '2026-01-01', 0
       FROM (VALUES ('SALARIO_BASE', 'SALARIO'), ('INSS_EMPREGADO', 'INSS'), ('IRRF', 'IRRF')) AS x(codigo, cod_rubr)
       JOIN folha.earning_deduction_code c ON c.account_id IS NULL AND c.codigo = x.codigo;
   END IF;

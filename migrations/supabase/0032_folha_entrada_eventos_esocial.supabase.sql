@@ -301,6 +301,7 @@ CREATE TABLE folha.rubric_esocial_config (
   vigencia_inicio date NOT NULL CHECK (EXTRACT(DAY FROM vigencia_inicio) = 1),
   vigencia_fim date CHECK (vigencia_fim IS NULL OR EXTRACT(DAY FROM vigencia_fim) = 1),
   teto_remun boolean,
+  ind_apur_ir smallint CHECK (ind_apur_ir IN (0, 1)),   -- indApurIR do item do S-1200 (0 normal, 1 RRA); sem valor = falta
   observacao text CHECK (observacao IS NULL OR char_length(observacao) BETWEEN 1 AND 255),
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
@@ -403,7 +404,7 @@ CREATE TABLE folha.contract_esocial (
     REFERENCES folha.employment_contract (account_id, employer_id, contract_id),
   UNIQUE (account_id, contract_id),
   UNIQUE (account_id, employer_id, matricula),
-  CONSTRAINT contract_esocial_termino_coerente CHECK (tp_contr = 2 OR dt_term IS NULL)
+  CONSTRAINT contract_esocial_termino_coerente CHECK (COALESCE(tp_contr, 0) = 2 OR dt_term IS NULL)
 );
 CREATE TRIGGER trg_contract_esocial_dominio
   BEFORE INSERT OR UPDATE ON folha.contract_esocial
@@ -632,14 +633,17 @@ AS $function$
   SELECT CASE p_valor WHEN true THEN 'S' WHEN false THEN 'N' END;
 $function$;
 
--- ideEmpregador: CNPJ pela raiz (8 posições), CPF com 11. Sem inscrição utilizável = NULL.
+-- ideEmpregador: CNPJ pela raiz (8 posições; 14 para as cinco naturezas jurídicas que o gerador lista em
+-- avisosInscricaoEmpregador), CPF com 11. Sem inscrição utilizável = NULL.
 CREATE FUNCTION folha.esocial_entrada_empregador(p_emp folha.employer) RETURNS jsonb
 LANGUAGE sql IMMUTABLE
 SET search_path = pg_catalog, pg_temp
 AS $function$
   SELECT CASE
            WHEN p_emp.tipo_inscricao = 'cnpj' AND p_emp.inscricao ~ '^[A-Z0-9]{12}[0-9]{2}$'
-             THEN jsonb_build_object('tpInsc', 1, 'nrInsc', left(p_emp.inscricao, 8))
+             THEN jsonb_build_object('tpInsc', 1, 'nrInsc',
+                    CASE WHEN p_emp.natureza_juridica IN ('101-5', '104-0', '107-4', '116-3', '134-1')
+                         THEN p_emp.inscricao ELSE left(p_emp.inscricao, 8) END)
            WHEN p_emp.tipo_inscricao = 'cpf' AND p_emp.inscricao ~ '^[0-9]{11}$'
              THEN jsonb_build_object('tpInsc', 2, 'nrInsc', p_emp.inscricao)
          END;
@@ -694,16 +698,36 @@ DECLARE
   v_r jsonb;
   v_event uuid;
   v_ger text;
+  v_acc jsonb := p_acc;
+  v_nat text;
+  v_orig text;
+  v_h0 text;
 BEGIN
-  v_estado := CASE WHEN jsonb_array_length(p_acc -> 'bloqueios') > 0 THEN 'bloqueado'
-                   WHEN jsonb_array_length(p_acc -> 'faltando') > 0 THEN 'incompleto'
+  SELECT e.natureza_juridica INTO v_nat FROM folha.employer e WHERE e.account_id = v_conta AND e.employer_id = p_employer;
+  IF v_nat IS NULL AND p_empregador ->> 'tpInsc' = '1' THEN
+    v_acc := folha.esocial_entrada_pende(v_acc, 'empregador.nrInsc',
+      'natureza jurídica não informada: o CNPJ do empregador vai pela raiz de 8 posições (a_validar; 14 posições para administração pública)');
+  END IF;
+  -- retificação sem mudança de conteúdo: nada a retificar (a função de retificação da 0031 faz a mesma recusa)
+  IF p_retifica IS NOT NULL AND jsonb_array_length(v_acc -> 'bloqueios') = 0 AND jsonb_array_length(v_acc -> 'faltando') = 0 THEN
+    SELECT x.origem_hash INTO v_orig FROM folha.esocial_event x WHERE x.account_id = v_conta AND x.event_id = p_retifica;
+    v_h0 := encode(sha256(convert_to(jsonb_build_object('evento', p_evento, 'ambiente', CASE p_ambiente WHEN 'producao' THEN 1 ELSE 2 END,
+                'empregador', p_empregador, 'dados', p_dados - 'retificacao')::text, 'UTF8')), 'hex');
+    IF v_h0 = v_orig THEN
+      v_acc := folha.esocial_entrada_bloqueia(v_acc, 'nada_a_retificar', 'O conteúdo de origem é idêntico ao do evento validado: nada a retificar');
+    END IF;
+  END IF;
+  v_estado := CASE WHEN jsonb_array_length(v_acc -> 'bloqueios') > 0 THEN 'bloqueado'
+                   WHEN jsonb_array_length(v_acc -> 'faltando') > 0 THEN 'incompleto'
                    ELSE 'pronto' END;
   IF v_estado <> 'pronto' THEN
+    IF p_registrar THEN
     INSERT INTO folha.esocial_entrada (account_id, employer_id, evento_codigo, ambiente, estado, faltando, bloqueios, pendencias, criado_por_subject)
-    VALUES (v_conta, p_employer, p_evento, p_ambiente, v_estado, p_acc -> 'faltando', p_acc -> 'bloqueios', p_acc -> 'pendencias', v_subject);
+    VALUES (v_conta, p_employer, p_evento, p_ambiente, v_estado, v_acc -> 'faltando', v_acc -> 'bloqueios', v_acc -> 'pendencias', v_subject);
+    END IF;
     RETURN jsonb_build_object('estado', v_estado, 'evento', p_evento, 'entrada', NULL,
-                              'faltando', p_acc -> 'faltando', 'detalhes', p_acc -> 'detalhes',
-                              'bloqueios', p_acc -> 'bloqueios', 'pendencias', p_acc -> 'pendencias',
+                              'faltando', v_acc -> 'faltando', 'detalhes', v_acc -> 'detalhes',
+                              'bloqueios', v_acc -> 'bloqueios', 'pendencias', v_acc -> 'pendencias',
                               'event_id', NULL, 'situacao', NULL);
   END IF;
 
@@ -726,18 +750,21 @@ BEGIN
     END IF;
   END IF;
 
-  INSERT INTO folha.esocial_entrada (account_id, employer_id, evento_codigo, ambiente, estado, event_id, entrada, entrada_hash,
-                                     faltando, bloqueios, pendencias, criado_por_subject)
-  VALUES (v_conta, p_employer, p_evento, p_ambiente, 'pronto', v_event, v_env, v_hash,
-          p_acc -> 'faltando', p_acc -> 'bloqueios', p_acc -> 'pendencias', v_subject)
-  ON CONFLICT (account_id, event_id, entrada_hash) WHERE estado = 'pronto' AND event_id IS NOT NULL DO NOTHING;
-
-  PERFORM folha.esocial_auditar(p_ctx, 'esocial_entrada', 'esocial_entrada', v_event,
-                                jsonb_build_object('evento_codigo', p_evento, 'ambiente', p_ambiente, 'registrado', p_registrar,
-                                                   'entrada_hash', v_hash, 'situacao', v_r ->> 'situacao'));
+  -- Só quem registra (folha.transmit) grava: a montagem só para leitura não deixa linha nem dado pessoal.
+  IF p_registrar THEN
+    INSERT INTO folha.esocial_entrada (account_id, employer_id, evento_codigo, ambiente, estado, event_id, entrada, entrada_hash,
+                                       faltando, bloqueios, pendencias, criado_por_subject)
+    VALUES (v_conta, p_employer, p_evento, p_ambiente, 'pronto', v_event, v_env, v_hash,
+            v_acc -> 'faltando', v_acc -> 'bloqueios', v_acc -> 'pendencias', v_subject)
+    ON CONFLICT (account_id, event_id, entrada_hash) WHERE estado = 'pronto' AND event_id IS NOT NULL DO NOTHING;
+    PERFORM folha.esocial_auditar(p_ctx, 'esocial_entrada', 'esocial_entrada', v_event,
+                                  jsonb_build_object('evento_codigo', p_evento, 'ambiente', p_ambiente, 'registrado', p_registrar,
+                                                     'entrada_hash', v_hash, 'situacao', v_r ->> 'situacao',
+                                                     'retifica_event_id', p_retifica, 'exclui_event_id', p_exclui, 'motivo', p_motivo));
+  END IF;
   RETURN jsonb_build_object('estado', 'pronto', 'evento', p_evento, 'entrada', v_env,
                             'faltando', '[]'::jsonb, 'detalhes', '[]'::jsonb, 'bloqueios', '[]'::jsonb,
-                            'pendencias', p_acc -> 'pendencias',
+                            'pendencias', v_acc -> 'pendencias',
                             'event_id', v_event, 'situacao', v_r ->> 'situacao');
 END
 $function$;
@@ -794,6 +821,11 @@ BEGIN
   IF (v_run.tipo_processo = 'rescisao') IS DISTINCT FROM (p_tp_pgto = 2) THEN
     RAISE EXCEPTION USING ERRCODE = '22023',
       MESSAGE = format('tpPgto %s não corresponde ao processo %s (1 = folha, 2 = rescisão)', p_tp_pgto, v_run.tipo_processo);
+  END IF;
+  PERFORM pg_advisory_xact_lock(hashtextextended('pgto|' || v_conta::text || '|' || p_result_id::text, 0));
+  IF p_dt_pgto < v_run.competencia THEN
+    RAISE EXCEPTION USING ERRCODE = '22023',
+      MESSAGE = format('A data de pagamento (%s) é anterior à competência da folha (%s)', p_dt_pgto, v_run.competencia);
   END IF;
   v_vr := COALESCE(p_vr_liq, v_res.liquido);
   IF v_vr IS NULL OR v_vr <= 0 THEN
@@ -890,6 +922,11 @@ BEGIN
   IF v_empregador IS NULL THEN
     v_acc := folha.esocial_entrada_falta(v_acc, 'empregador.nrInsc', 'empregador sem CNPJ ou CPF utilizável (tipo caepf não informa o CPF)');
   END IF;
+  IF v_ee.cpf !~ '^[0-9]{11}$' THEN
+    v_acc := folha.esocial_entrada_falta(v_acc, 'dados.trabalhador.cpfTrab', 'CPF fora de onze dígitos');
+  END IF;
+  v_acc := folha.esocial_entrada_pende(v_acc, 'dados.demonstrativos[].estabelecimentos[].remuneracoes[].infoAgNocivo',
+    'exposição a agente nocivo (grauExp) não é verificada: a Folha não tem cadastro de exposição (a_validar)');
 
   IF p_ind_apuracao = 2 THEN
     v_acc := folha.esocial_entrada_bloqueia(v_acc, 'decimo_terceiro_nao_suportado',
@@ -1012,6 +1049,10 @@ BEGIN
           v_acc := folha.esocial_entrada_falta(v_acc,
             v_base || format('.estabelecimentos[0].remuneracoes[0].itens[%s].ideTabRubr', v_kk),
             format('rubrica %s sem cadastro no S-1010 (rubric_esocial_config) para %s', v_item.rubrica_codigo, to_char(p_periodo, 'YYYY-MM')));
+        ELSIF v_cfg.ind_apur_ir IS NULL THEN
+          v_acc := folha.esocial_entrada_falta(v_acc,
+            v_base || format('.estabelecimentos[0].remuneracoes[0].itens[%s].indApurIR', v_kk),
+            format('rubrica %s sem indApurIR no cadastro do S-1010 (o gerador exige a partir de 2021-07)', v_item.rubrica_codigo));
         ELSE
           v_qtd := CASE WHEN v_item.quantidade IS NOT NULL AND round(v_item.quantidade, 2) > 0 THEN round(v_item.quantidade, 2) END;
           IF v_item.quantidade IS NOT NULL AND v_item.quantidade <> round(v_item.quantidade, 2) THEN
@@ -1021,7 +1062,7 @@ BEGIN
           v_itens := v_itens || jsonb_build_array(jsonb_strip_nulls(jsonb_build_object(
             'codRubr', v_cfg.cod_rubr, 'ideTabRubr', v_cfg.ide_tab_rubr,
             'qtdRubr', CASE WHEN v_qtd IS NOT NULL THEN folha.esocial_entrada_dec(v_qtd) END,
-            'vrRubr', folha.esocial_entrada_dec(v_item.valor))));
+            'vrRubr', folha.esocial_entrada_dec(v_item.valor), 'indApurIR', v_cfg.ind_apur_ir)));
         END IF;
         v_kk := v_kk + 1;
       END LOOP;
@@ -1145,6 +1186,9 @@ BEGIN
   IF v_empregador IS NULL THEN
     v_acc := folha.esocial_entrada_falta(v_acc, 'empregador.nrInsc', 'empregador sem CNPJ ou CPF utilizável (tipo caepf não informa o CPF)');
   END IF;
+  IF v_ee.cpf !~ '^[0-9]{11}$' THEN
+    v_acc := folha.esocial_entrada_falta(v_acc, 'dados.beneficiario.cpfBenef', 'CPF fora de onze dígitos');
+  END IF;
 
   IF folha.esocial_periodo_fechado(v_conta, p_employer_id, p_ambiente, 1::smallint, p_periodo) THEN
     v_acc := folha.esocial_entrada_bloqueia(v_acc, 'periodo_fechado',
@@ -1200,7 +1244,8 @@ BEGIN
       IF EXISTS (SELECT 1 FROM folha.payroll_result_item i
                   WHERE i.account_id = v_conta AND i.result_id = v_pay.result_id
                     AND (i.rubrica_codigo IN ('PENSAO_ALIMENTICIA', 'PLANO_SAUDE')
-                         OR COALESCE(NULLIF(i.detalhe ->> 'dependentes', '')::numeric, 0) > 0)) THEN
+                         OR i.detalhe ->> 'deducao_aplicada' = 'legais'
+                         OR (i.detalhe ->> 'dependentes' ~ '^[0-9]+(\.[0-9]+)?$' AND (i.detalhe ->> 'dependentes')::numeric > 0))) THEN
         v_acc := folha.esocial_entrada_bloqueia(v_acc, 'info_ir_complementar',
           format('O resultado %s tem dedução de IRRF a declarar (dependente, pensão alimentícia ou plano de saúde): o infoIRComplem não é gerado nesta versão', v_pay.result_id));
       END IF;
@@ -1326,11 +1371,21 @@ BEGIN
 
   -- trabalhador
   v_acc := folha.esocial_entrada_exige(v_acc, 'dados.trabalhador.sexo', v_ee.sexo::text, 'sexo não informado');
+  IF v_ee.cpf !~ '^[0-9]{11}$' THEN
+    v_acc := folha.esocial_entrada_falta(v_acc, 'dados.trabalhador.cpfTrab', 'CPF fora de onze dígitos');
+  END IF;
+  IF EXISTS (SELECT 1 FROM folha.employee_dependent d WHERE d.account_id = v_conta AND d.employee_id = v_con.employee_id
+                AND d.dep_irrf AND d.cpf_dep IS NULL) THEN
+    v_acc := folha.esocial_entrada_falta(v_acc, 'dados.trabalhador.dependente[].cpfDep', 'dependente com dedução de IRRF sem CPF (o gerador exige)');
+  END IF;
   IF v_ee.nome_completo IS NULL OR char_length(btrim(v_ee.nome_completo)) NOT BETWEEN 2 AND 70 THEN
     v_acc := folha.esocial_entrada_falta(v_acc, 'dados.trabalhador.nmTrab', 'nome fora de 2 a 70 posições');
   END IF;
   IF v_tem_en THEN
     v_acc := folha.esocial_entrada_exige(v_acc, 'dados.trabalhador.racaCor', v_en.raca_cor::text, 'raça/cor não informada');
+    IF v_en.raca_cor = 6 AND v_con.data_admissao >= DATE '2024-04-22' THEN
+      v_acc := folha.esocial_entrada_falta(v_acc, 'dados.trabalhador.racaCor', 'raça/cor 6 não é aceita para admissão a partir de 2024-04-22 (regra do gerador)');
+    END IF;
     v_acc := folha.esocial_entrada_dominio(v_acc, 'dados.trabalhador.racaCor', 'racaCor', v_en.raca_cor::text, 'XSD');
     v_acc := folha.esocial_entrada_exige(v_acc, 'dados.trabalhador.grauInstr', v_en.grau_instr, 'grau de instrução não informado');
     v_acc := folha.esocial_entrada_dominio(v_acc, 'dados.trabalhador.grauInstr', 'grauInstr', v_en.grau_instr, 'XSD');
@@ -1372,6 +1427,31 @@ BEGIN
     v_acc := folha.esocial_entrada_exige(v_acc, 'dados.vinculo.infoCeletista.cnpjSindCategProf', v_ce.cnpj_sind_categ_prof, 'CNPJ do sindicato da categoria não informado');
     v_acc := folha.esocial_entrada_exige(v_acc, 'dados.vinculo.infoContrato.CBOCargo', v_ce.cbo_cargo, 'CBO do cargo não informado');
     v_acc := folha.esocial_entrada_exige(v_acc, 'dados.vinculo.infoContrato.codCateg', v_ce.cod_categ, 'categoria do trabalhador (Tabela 01) não informada');
+    IF v_ce.cod_categ IS NOT NULL AND v_ce.cod_categ NOT IN ('101', '102', '103', '105', '107', '108', '111') THEN
+      v_acc := folha.esocial_entrada_falta(v_acc, 'dados.vinculo.infoContrato.codCateg',
+        format('a categoria %s não é de vínculo celetista no escopo do gerador (101, 102, 103, 105, 107, 108, 111)', v_ce.cod_categ));
+    END IF;
+    IF v_ce.ind_admissao = 3 THEN
+      v_acc := folha.esocial_entrada_bloqueia(v_acc, 'ind_admissao_3', 'indAdmissao 3 exige o número do processo trabalhista (nrProcTrab), que o cadastro não guarda: o caso não é gerado');
+    END IF;
+    IF v_ce.tp_contr = 2 AND v_ce.dt_term IS NULL THEN
+      v_acc := folha.esocial_entrada_falta(v_acc, 'dados.vinculo.infoContrato.duracao.dtTerm', 'contrato por prazo determinado sem a data de término');
+    END IF;
+    IF v_ce.tp_contr = 3 AND v_ce.obj_det IS NULL THEN
+      v_acc := folha.esocial_entrada_falta(v_acc, 'dados.vinculo.infoContrato.duracao.objDet', 'contrato por obra certa sem o objeto determinante');
+    END IF;
+    IF v_ce.tmp_parc = 1 THEN
+      v_acc := folha.esocial_entrada_falta(v_acc, 'dados.vinculo.infoContrato.horContratual.tmpParc', 'tmpParc 1 só vale para a categoria 104 (regra do gerador)');
+    END IF;
+    IF v_ce.und_sal_fixo IN (6, 7) AND v_ce.dsc_sal_var IS NULL THEN
+      v_acc := folha.esocial_entrada_falta(v_acc, 'dados.vinculo.infoContrato.remuneracao.dscSalVar', 'unidade de salário 6 ou 7 exige a descrição do salário variável');
+    END IF;
+    IF v_ce.hor_noturno IS NULL AND v_ce.cod_categ IS DISTINCT FROM '111' THEN
+      v_acc := folha.esocial_entrada_falta(v_acc, 'dados.vinculo.infoContrato.horContratual.horNoturno', 'indicação de horário noturno não informada');
+    END IF;
+    IF v_con.data_admissao < DATE '1988-10-05' AND v_ce.dt_opc_fgts IS NULL THEN
+      v_acc := folha.esocial_entrada_falta(v_acc, 'dados.vinculo.infoCeletista.FGTS.dtOpcFGTS', 'admissão anterior a 05/10/1988 exige a data de opção pelo FGTS');
+    END IF;
     v_acc := folha.esocial_entrada_dominio(v_acc, 'dados.vinculo.infoContrato.codCateg', 'codCateg', v_ce.cod_categ, '01');
     v_acc := folha.esocial_entrada_exige(v_acc, 'dados.vinculo.infoContrato.remuneracao.undSalFixo', v_ce.und_sal_fixo::text);
     v_acc := folha.esocial_entrada_exige(v_acc, 'dados.vinculo.infoContrato.duracao.tpContr', v_ce.tp_contr::text);
@@ -1437,7 +1517,7 @@ BEGIN
       'dtAdm', folha.esocial_entrada_data(v_con.data_admissao), 'tpAdmissao', 1, 'indAdmissao', v_ce.ind_admissao,
       'tpRegJor', v_ce.tp_reg_jor, 'natAtividade', v_ce.nat_atividade, 'dtBase', v_ce.dt_base,
       'cnpjSindCategProf', v_ce.cnpj_sind_categ_prof,
-      'FGTS', CASE WHEN v_ce.dt_opc_fgts IS NOT NULL THEN jsonb_build_object('dtOpcFGTS', folha.esocial_entrada_data(v_ce.dt_opc_fgts)) END,
+      'FGTS', CASE WHEN v_ce.dt_opc_fgts IS NOT NULL AND v_con.data_admissao < DATE '1988-10-05' THEN jsonb_build_object('dtOpcFGTS', folha.esocial_entrada_data(v_ce.dt_opc_fgts)) END,
       'aprend', CASE WHEN v_con.regime_trabalho = 'aprendiz' THEN v_ce.aprend END));
     v_contrato := jsonb_strip_nulls(jsonb_build_object(
       'nmCargo', btrim(v_con.cargo), 'CBOCargo', v_ce.cbo_cargo, 'nmFuncao', v_ce.nm_funcao, 'CBOFuncao', v_ce.cbo_funcao,
@@ -1610,6 +1690,40 @@ BEGIN
     END IF;
   END LOOP;
 
+  -- cobertura: todo resultado de folha fechada do período tem S-1200 validado; todo pagamento, S-1210 validado
+  FOR v_run IN
+    SELECT DISTINCT pr.employee_id FROM folha.payroll_result pr
+      JOIN folha.payroll_run r ON r.account_id = pr.account_id AND r.run_id = pr.run_id
+     WHERE pr.account_id = v_conta AND r.employer_id = p_employer_id AND r.status = 'closed'
+       AND p_ind_apuracao = 1 AND r.competencia = p_periodo AND r.tipo_processo IN ('mensal', 'complementar', 'ferias')
+       AND NOT EXISTS (SELECT 1 FROM folha.esocial_event x
+                        WHERE x.account_id = v_conta AND x.employer_id = p_employer_id AND x.ambiente = p_ambiente
+                          AND x.evento_codigo = 'S-1200' AND x.employee_id = pr.employee_id AND x.ind_apuracao = 1
+                          AND x.periodo_apuracao = p_periodo AND x.estado = 'validado')
+  LOOP
+    v_acc := folha.esocial_entrada_bloqueia(v_acc, 'resultado_sem_s1200',
+      format('O trabalhador %s tem remuneração em folha fechada do período sem S-1200 validado', v_run.employee_id));
+  END LOOP;
+  FOR v_run IN
+    SELECT DISTINCT p.employee_id FROM folha.payroll_payment p
+     WHERE p.account_id = v_conta AND p.employer_id = p_employer_id AND p_ind_apuracao = 1
+       AND date_trunc('month', p.dt_pgto)::date = p_periodo
+       AND NOT EXISTS (SELECT 1 FROM folha.esocial_event x
+                        WHERE x.account_id = v_conta AND x.employer_id = p_employer_id AND x.ambiente = p_ambiente
+                          AND x.evento_codigo = 'S-1210' AND x.employee_id = p.employee_id
+                          AND x.periodo_apuracao = p_periodo AND x.estado = 'validado')
+  LOOP
+    v_acc := folha.esocial_entrada_bloqueia(v_acc, 'pagamento_sem_s1210',
+      format('O trabalhador %s tem pagamento no mês sem S-1210 validado', v_run.employee_id));
+  END LOOP;
+  IF EXISTS (SELECT 1 FROM folha.payroll_run r
+              WHERE r.account_id = v_conta AND r.employer_id = p_employer_id AND r.status = 'closed'
+                AND r.tipo_processo IN ('rescisao', 'decimo_terceiro_1', 'decimo_terceiro_2')
+                AND ((p_ind_apuracao = 1 AND r.competencia = p_periodo)
+                     OR (p_ind_apuracao = 2 AND date_trunc('year', r.competencia)::date = p_periodo))) THEN
+    v_acc := folha.esocial_entrada_bloqueia(v_acc, 'processo_sem_gerador',
+      'Há folha fechada de rescisão ou de 13º no período: o S-2299 e o S-1200 anual ainda não são gerados, e o fechamento não pode declarar o período sem eles');
+  END IF;
   v_acc := folha.esocial_entrada_pende(v_acc, 'dados.infoFech.evtComProd', 'S-1260 sem origem de dado na Folha: declarado sem movimento (a validar)');
   v_acc := folha.esocial_entrada_pende(v_acc, 'dados.infoFech.evtContratAvNP', 'S-1270 sem origem de dado na Folha: declarado sem movimento (a validar)');
   v_acc := folha.esocial_entrada_pende(v_acc, 'dados.infoFech.evtInfoComplPer', 'S-1280 sem origem de dado na Folha: declarado sem movimento (a validar)');
@@ -1755,6 +1869,10 @@ BEGIN
   IF NOT FOUND THEN
     v_acc := folha.esocial_entrada_falta(v_acc, 'dados.operacao.infoCadastro', 'empregador sem dados do eSocial nesta vigência (employer_esocial)');
   ELSE
+    IF v_emp.tipo_inscricao = 'cnpj' AND (v_es.ind_coop IS NULL OR v_es.ind_constr IS NULL) THEN
+      v_acc := folha.esocial_entrada_falta(v_acc, 'dados.operacao.infoCadastro.indCoop',
+        'indCoop e indConstr são obrigatórios para pessoa jurídica (regra do gerador)');
+    END IF;
     v_class := COALESCE(v_es.class_trib, v_emp.classificacao_tributaria);
     IF v_class IS NULL OR v_class !~ '^[0-9]{2}$' THEN
       v_acc := folha.esocial_entrada_falta(v_acc, 'dados.operacao.infoCadastro.classTrib', 'classificação tributária (Tabela 08) ausente ou fora de dois dígitos');
@@ -1854,7 +1972,7 @@ BEGIN
 
   IF jsonb_array_length(v_acc -> 'faltando') = 0 THEN
     v_gilrat := jsonb_strip_nulls(jsonb_build_object(
-      'aliqRat', v_es.aliq_rat, 'fap', CASE WHEN v_fap.fap IS NOT NULL THEN to_char(v_fap.fap, 'FM0.0000') END,
+      'aliqRat', CASE WHEN v_es.proc_adm_jud_rat IS NOT NULL THEN v_es.aliq_rat END, 'fap', CASE WHEN v_fap.fap IS NOT NULL THEN to_char(v_fap.fap, 'FM0.0000') END,
       'procAdmJudRat', v_es.proc_adm_jud_rat, 'procAdmJudFap', v_es.proc_adm_jud_fap));
     v_dados := jsonb_strip_nulls(jsonb_build_object(
       'cnaePrep', v_est.cnae_preponderante, 'cnpjResp', v_es.cnpj_resp,
@@ -1939,7 +2057,7 @@ BEGIN
   END IF;
 
   SELECT n.natureza_codigo INTO v_nat FROM folha.rubric_esocial_nature n
-   WHERE n.code_id = p_code_id AND n.vigencia_inicio <= p_vigencia_inicio AND (n.vigencia_fim IS NULL OR n.vigencia_fim >= p_vigencia_inicio);
+   WHERE n.code_id = p_code_id AND (n.account_id IS NULL OR n.account_id = v_conta) AND n.vigencia_inicio <= p_vigencia_inicio AND (n.vigencia_fim IS NULL OR n.vigencia_fim >= p_vigencia_inicio);
   IF v_nat IS NULL OR v_nat !~ '^[0-9]{4}$' THEN
     v_acc := folha.esocial_entrada_falta(v_acc, 'dados.operacao.dadosRubrica.natRubr', 'natureza da rubrica (Tabela 03) não cadastrada para a vigência');
   ELSE
@@ -1949,13 +2067,21 @@ BEGIN
   FOR v_inc IN
     SELECT ri.tributo, ic.codigo_esocial FROM folha.rubric_incidence ri
       JOIN folha.incidence_code ic ON ic.tributo = ri.tributo AND ic.codigo = ri.incidencia_codigo
-     WHERE ri.code_id = p_code_id AND ri.vigencia_inicio <= p_vigencia_inicio AND (ri.vigencia_fim IS NULL OR ri.vigencia_fim >= p_vigencia_inicio)
+     WHERE ri.code_id = p_code_id AND (ri.account_id IS NULL OR ri.account_id = v_conta)
+       AND ri.vigencia_inicio <= p_vigencia_inicio AND (ri.vigencia_fim IS NULL OR ri.vigencia_fim >= p_vigencia_inicio)
   LOOP
     IF v_inc.tributo = 'previdencia' THEN v_cp := v_inc.codigo_esocial;
     ELSIF v_inc.tributo = 'irrf' THEN v_irrf := v_inc.codigo_esocial;
     ELSIF v_inc.tributo = 'fgts' THEN v_fgts := v_inc.codigo_esocial;
     END IF;
   END LOOP;
+  IF EXISTS (SELECT 1 FROM folha.rubric_incidence ri JOIN folha.incidence_code ic ON ic.tributo = ri.tributo AND ic.codigo = ri.incidencia_codigo
+              WHERE ri.code_id = p_code_id AND (ri.account_id IS NULL OR ri.account_id = v_conta)
+                AND ri.vigencia_inicio <= p_vigencia_inicio AND (ri.vigencia_fim IS NULL OR ri.vigencia_fim >= p_vigencia_inicio)
+                AND (ri.status_validacao = 'a_validar' OR ic.esocial_status = 'a_validar')) THEN
+    v_acc := folha.esocial_entrada_pende(v_acc, 'dados.operacao.dadosRubrica.incidencias',
+      'incidência da rubrica ou código do eSocial ainda a_validar na fonte (rubric_incidence / incidence_code)');
+  END IF;
   v_acc := folha.esocial_entrada_exige(v_acc, 'dados.operacao.dadosRubrica.codIncCP', v_cp, 'incidência para a Previdência sem código do eSocial (incidence_code.codigo_esocial)');
   v_acc := folha.esocial_entrada_dominio(v_acc, 'dados.operacao.dadosRubrica.codIncCP', 'codIncCP', v_cp, 'XSD');
   v_acc := folha.esocial_entrada_exige(v_acc, 'dados.operacao.dadosRubrica.codIncIRRF', v_irrf, 'incidência para o IRRF sem código do eSocial (Tabela 21 não carregada)');

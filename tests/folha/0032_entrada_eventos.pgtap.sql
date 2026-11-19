@@ -15,7 +15,7 @@
 -- 'ERRO <sqlstate>: <mensagem>'.
 BEGIN;
 
-SELECT plan(274);
+SELECT plan(285);
 
 \set A '''a0000000-0000-0000-0000-000000000032'''
 \set B '''b0000000-0000-0000-0000-000000000032'''
@@ -155,8 +155,8 @@ LANGUAGE plpgsql AS $$
 DECLARE
   v_emp uuid; v_est uuid; v_lot uuid;
 BEGIN
-  INSERT INTO folha.employer (account_id, tipo_inscricao, inscricao, razao_social, classificacao_tributaria)
-  VALUES (p_conta, 'cnpj', p_cnpj, 'Empresa Sintetica ' || p_k, NULL) RETURNING employer_id INTO v_emp;
+  INSERT INTO folha.employer (account_id, tipo_inscricao, inscricao, razao_social, classificacao_tributaria, natureza_juridica)
+  VALUES (p_conta, 'cnpj', p_cnpj, 'Empresa Sintetica ' || p_k, NULL, '206-2') RETURNING employer_id INTO v_emp;
   INSERT INTO folha.employer_regime (account_id, employer_id, vigencia_inicio, regime_tributario)
   VALUES (p_conta, v_emp, '2024-01-01', 'lucro_presumido');
   INSERT INTO folha.establishment (account_id, employer_id, tipo_inscricao, inscricao, cnae_preponderante)
@@ -174,8 +174,8 @@ BEGIN
     VALUES (p_conta, v_est, '2026-01-01', '2026-10-01', 2);
     INSERT INTO folha.tax_allocation_detail (account_id, allocation_id, vigencia_inicio, vigencia_fim, fpas, codigo_terceiros)
     VALUES (p_conta, v_lot, '2026-01-01', '2026-10-31', '507', '0000');
-    INSERT INTO folha.rubric_esocial_config (account_id, employer_id, code_id, cod_rubr, ide_tab_rubr, vigencia_inicio)
-    SELECT p_conta, v_emp, c.code_id, x.cod_rubr, 'DNEX01', '2026-01-01'
+    INSERT INTO folha.rubric_esocial_config (account_id, employer_id, code_id, cod_rubr, ide_tab_rubr, vigencia_inicio, ind_apur_ir)
+    SELECT p_conta, v_emp, c.code_id, x.cod_rubr, 'DNEX01', '2026-01-01', 0
       FROM (VALUES ('SALARIO_BASE', 'SALARIO'), ('INSS_EMPREGADO', 'INSS'), ('IRRF', 'IRRF')) AS x(codigo, cod_rubr)
       JOIN folha.earning_deduction_code c ON c.account_id IS NULL AND c.codigo = x.codigo;
   END IF;
@@ -622,8 +622,11 @@ SELECT is(pg_temp.guarda('s2200_contrato_de_outro', pg_temp.tx_a(format($q$SELEC
   pg_temp.id('EC'), pg_temp.id('T1')))) LIKE 'ERRO 22023%', true, 'S-2200: contrato que não é do empregador informado é recusado');
 SELECT is(pg_temp.guarda('s2200_sem_transmit', pg_temp.so(ARRAY['folha.read'], format($q$SELECT folha.esocial_entrada_s2200_v1(%L::uuid, %L::uuid, 'producao_restrita', NULL, true, NULL, NULL)::text$q$,
   pg_temp.id('EA'), pg_temp.id('T2')))) LIKE 'ERRO 42501%', true, 'S-2200: registrar sem folha.transmit é recusado (42501)');
+CREATE TEMP TABLE antes AS SELECT (SELECT count(*) FROM folha.esocial_entrada) AS ent, (SELECT count(*) FROM folha.auditoria) AS aud;
 SELECT is(pg_temp.guarda('s2200_so_leitura', pg_temp.so(ARRAY['folha.read'], format($q$SELECT folha.esocial_entrada_s2200_v1(%L::uuid, %L::uuid, 'producao_restrita', NULL, false, NULL, NULL) ->> 'estado'$q$,
   pg_temp.id('EA'), pg_temp.id('T2')))), 'pronto', 'S-2200: sem registrar, folha.read basta (montagem sem efeito)');
+SELECT is((SELECT ((SELECT count(*) FROM folha.esocial_entrada) - ent)::text || ':' || ((SELECT count(*) FROM folha.auditoria) - aud)::text FROM antes), '0:0',
+  'S-2200: a montagem só para leitura não grava nada (nem registro de entrada com dado pessoal, nem auditoria)');
 SELECT is(pg_temp.guarda('s2200_sem_contexto', pg_temp.pedido(NULL, NULL, NULL, false, false, ARRAY[format($q$SELECT folha.esocial_entrada_s2200_v1(%L::uuid, %L::uuid, 'producao_restrita', NULL, false, NULL, NULL)::text$q$,
   pg_temp.id('EA'), pg_temp.id('T2'))])) LIKE 'ERRO 42501%', true, 'S-2200: sem contexto da Folha é recusado (42501)');
 SELECT is(pg_temp.guarda('s2200_ambiente', pg_temp.tx_a(format($q$SELECT folha.esocial_entrada_s2200_v1(%L::uuid, %L::uuid, 'homologacao', NULL, true, NULL, NULL)::text$q$,
@@ -632,11 +635,26 @@ SELECT is((SELECT count(*) FROM folha.esocial_event WHERE contract_id = pg_temp.
 
 -- Dependentes entram no grupo, sem inventar tipo
 INSERT INTO folha.employee_dependent (account_id, employee_id, nm_dep, dt_nascto, tp_dep, cpf_dep, dep_irrf, dep_sf, inc_trab)
-VALUES (:A, pg_temp.id('T2.trab'), 'Dependente Sintetico Um', '2015-03-10', '03', NULL, true, false, false);
+VALUES (:A, pg_temp.id('T2.trab'), 'Dependente Sintetico Um', '2015-03-10', '03', '12312312387', true, false, false);
 SELECT pg_temp.s2200('s2200_t2_dep', 'EA', 'T2', false);
 SELECT is(pg_temp.j('s2200_t2_dep') #>> '{entrada,dados,trabalhador,dependente,0,depIRRF}', 'S', 'S-2200: dependente com dedução de IRRF');
 SELECT is(pg_temp.j('s2200_t2_dep') #>> '{entrada,dados,trabalhador,dependente,0,tpDep}', '03', 'S-2200: tipo do dependente do cadastro');
-SELECT ok(NOT ((pg_temp.j('s2200_t2_dep') #> '{entrada,dados,trabalhador,dependente,0}') ? 'cpfDep'), 'S-2200: CPF do dependente ausente no cadastro não vira texto vazio');
+SELECT is(pg_temp.j('s2200_t2_dep') #>> '{entrada,dados,trabalhador,dependente,0,cpfDep}', '12312312387', 'S-2200: CPF do dependente do cadastro');
+UPDATE folha.employee_dependent SET cpf_dep = NULL WHERE employee_id = pg_temp.id('T2.trab');
+SELECT pg_temp.s2200('s2200_t2_dep_sem_cpf', 'EA', 'T2', false);
+SELECT is(pg_temp.falt('s2200_t2_dep_sem_cpf'), 'dados.trabalhador.dependente[].cpfDep', 'S-2200: dependente com dedução de IRRF sem CPF fica em "faltando" (o gerador exige)');
+UPDATE folha.employee_dependent SET cpf_dep = '12312312387' WHERE employee_id = pg_temp.id('T2.trab');
+UPDATE folha.contract_esocial SET tp_contr = 2 WHERE contract_id = pg_temp.id('T1');
+SELECT pg_temp.s2200('s2200_t1_prazo', 'EA', 'T1', false);
+SELECT is(pg_temp.falt('s2200_t1_prazo'), 'dados.vinculo.infoContrato.duracao.dtTerm', 'S-2200: contrato por prazo determinado sem a data de término fica incompleto');
+UPDATE folha.contract_esocial SET tp_contr = 1, cod_categ = '901' WHERE contract_id = pg_temp.id('T1');
+SELECT pg_temp.s2200('s2200_t1_901', 'EA', 'T1', false);
+SELECT is(pg_temp.falt('s2200_t1_901'), 'dados.vinculo.infoContrato.codCateg', 'S-2200: categoria fora das de vínculo celetista do gerador (901 é estágio) não passa');
+UPDATE folha.contract_esocial SET cod_categ = '101' WHERE contract_id = pg_temp.id('T1');
+UPDATE folha.employee SET cpf = 'ABC' WHERE employee_id = pg_temp.id('T1.trab');
+SELECT pg_temp.s2200('s2200_t1_cpf', 'EA', 'T1', false);
+SELECT is(pg_temp.falt('s2200_t1_cpf'), 'dados.trabalhador.cpfTrab', 'S-2200: CPF fora de onze dígitos não vai para a entrada');
+UPDATE folha.employee SET cpf = '11144477735' WHERE employee_id = pg_temp.id('T1.trab');
 SELECT ok(pg_temp.pend('s2200_t2_dep') LIKE '%dependente[].tpDep%', 'S-2200: tipo de dependente (Tabela 07) vazia vira pendência');
 
 -- ===========================================================================
@@ -655,8 +673,13 @@ SELECT is(pg_temp.est('s1000_ec') || ':' || pg_temp.falt('s1000_ec'), 'incomplet
 SELECT pg_temp.s1000('s1000_vig_errada', 'EA', '2026-01-15');
 SELECT is(pg_temp.erro('s1000_vig_errada'), 'ERRO 22023:', 'S-1000: início de validade fora do dia 1 é recusado');
 UPDATE folha.employer SET classificacao_tributaria = '03' WHERE employer_id = pg_temp.id('EC');
+SELECT is(pg_temp.tx_a(format($q$SELECT (folha.esocial_entrada_s1000_v1(%L::uuid, '2026-01-01', 'producao_restrita', NULL, false) -> 'faltando')::text$q$, pg_temp.id('EC'))),
+  '["dados.operacao.infoCadastro"]', 'S-1000: sem cadastro do eSocial na vigência (antes do insert abaixo)');
 INSERT INTO folha.employer_esocial (account_id, employer_id, vigencia_inicio, ind_des_folha, ind_opt_reg_eletron)
 VALUES (:A, pg_temp.id('EC'), '2026-01-01', 1, 1);
+SELECT is(pg_temp.tx_a(format($q$SELECT (folha.esocial_entrada_s1000_v1(%L::uuid, '2026-01-01', 'producao_restrita', NULL, false) -> 'faltando')::text$q$, pg_temp.id('EC'))),
+  '["dados.operacao.infoCadastro.indCoop"]', 'S-1000: indCoop e indConstr são obrigatórios para pessoa jurídica');
+UPDATE folha.employer_esocial SET ind_coop = 0, ind_constr = 0 WHERE employer_id = pg_temp.id('EC');
 SELECT pg_temp.s1000('s1000_ec2', 'EC', '2026-01-01', false);
 SELECT is(pg_temp.j('s1000_ec2') #>> '{entrada,dados,operacao,infoCadastro,classTrib}', '03', 'S-1000: a classificação tributária reusa a do empregador quando a vigência não a traz');
 SELECT is(pg_temp.j('s1000_ec2') #>> '{entrada,dados,operacao,idePeriodo}', '{"iniValid": "2026-01"}', 'S-1000: vigência aberta não leva fimValid');
@@ -664,8 +687,12 @@ SELECT is(pg_temp.j('s1000_ec2') #>> '{entrada,dados,operacao,idePeriodo}', '{"i
 SELECT pg_temp.s1005('s1005_ea', 'EA.est', '2026-01-01');
 SELECT is(pg_temp.est('s1005_ea'), 'pronto', 'S-1005: estabelecimento com CNAE de sete dígitos e dados do eSocial');
 SELECT is(pg_temp.j('s1005_ea') #> '{entrada,dados,operacao}',
-  '{"tipo": "inclusao", "ideEstab": {"tpInsc": 1, "nrInsc": "11222333000181", "iniValid": "2026-01", "fimValid": "2026-10"}, "dadosEstab": {"cnaePrep": "6201501", "aliqGilrat": {"fap": "1.0500", "aliqRat": 2}}}'::jsonb,
-  'S-1005: CNAE do estabelecimento, RAT do cadastro e FAP vigente de establishment_fap');
+  '{"tipo": "inclusao", "ideEstab": {"tpInsc": 1, "nrInsc": "11222333000181", "iniValid": "2026-01", "fimValid": "2026-10"}, "dadosEstab": {"cnaePrep": "6201501", "aliqGilrat": {"fap": "1.0500"}}}'::jsonb,
+  'S-1005: CNAE do estabelecimento e FAP vigente; o aliqRat não sai sem processo (o gerador o recusa)');
+UPDATE folha.establishment_esocial SET proc_adm_jud_rat = '{"tpProc": 1, "nrProc": "12345678901234567", "codSusp": "1"}' WHERE establishment_id = pg_temp.id('EA.est');
+SELECT pg_temp.s1005('s1005_rat', 'EA.est', '2026-01-01', false);
+SELECT is(pg_temp.j('s1005_rat') #> '{entrada,dados,operacao,dadosEstab,aliqGilrat}', '{"fap": "1.0500", "aliqRat": 2, "procAdmJudRat": {"tpProc": 1, "nrProc": "12345678901234567", "codSusp": "1"}}'::jsonb, 'S-1005: com o processo, o aliqRat sai');
+UPDATE folha.establishment_esocial SET proc_adm_jud_rat = NULL WHERE establishment_id = pg_temp.id('EA.est');
 SELECT is((SELECT codigo_tabela FROM folha.esocial_event WHERE event_id = pg_temp.id('s1005_ea')), '11222333000181', 'S-1005: a identificação do estabelecimento é o código da tabela na fila');
 UPDATE folha.establishment SET cnae_preponderante = '62015' WHERE establishment_id = pg_temp.id('EA.est');
 SELECT pg_temp.s1005('s1005_cnae', 'EA.est', '2026-01-01', false);
@@ -700,7 +727,7 @@ SELECT is(pg_temp.est('s1010_sal'), 'pronto', 'S-1010: rubrica com configuraçã
 SELECT is(pg_temp.j('s1010_sal') #> '{entrada,dados,operacao}',
   '{"tipo": "inclusao", "ideRubrica": {"codRubr": "SALARIO", "ideTabRubr": "DNEX01", "iniValid": "2026-01"}, "dadosRubrica": {"dscRubr": "Salário base contratual", "natRubr": "1000", "tpRubr": 1, "codIncCP": "11", "codIncIRRF": "11", "codIncFGTS": "11"}}'::jsonb,
   'S-1010: codRubr e ideTabRubr do cadastro, natureza, tpRubr derivado do tipo da rubrica e incidências do catálogo');
-SELECT ok(pg_temp.pend('s1010_sal') = 'dados.operacao.dadosRubrica.codIncIRRF', 'S-1010: só a Tabela 21 (IRRF) fica pendente; natureza e CP/FGTS foram conferidas nas tabelas carregadas');
+SELECT is(pg_temp.pend('s1010_sal'), 'dados.operacao.dadosRubrica.codIncIRRF,dados.operacao.dadosRubrica.incidencias', 'S-1010: a Tabela 21 (IRRF) e as incidências ainda a_validar ficam pendentes; natureza e CP/FGTS foram conferidas nas tabelas carregadas');
 SELECT is((SELECT codigo_tabela FROM folha.esocial_event WHERE event_id = pg_temp.id('s1010_sal')), 'SALARIO/DNEX01', 'S-1010: código e identificador da tabela são a chave na fila');
 UPDATE folha.incidence_code SET codigo_esocial = '77' WHERE tributo = 'fgts' AND codigo = 'BASE_MENSAL';
 SELECT pg_temp.s1010('s1010_fgts_invalido', 'EA', 'SALARIO_BASE', '2026-01-01', false);
@@ -709,7 +736,7 @@ UPDATE folha.incidence_code SET codigo_esocial = '11' WHERE tributo = 'fgts' AND
 SELECT pg_temp.s1010('s1010_inss', 'EA', 'INSS_EMPREGADO', '2026-01-01', false);
 SELECT ok(pg_temp.falt('s1010_inss') LIKE '%natRubr%', 'S-1010: rubrica de desconto sem natureza cadastrada fica incompleta');
 SELECT pg_temp.s1010('s1010_base', 'EA', 'BASE_INSS', '2026-01-01', false);
-SELECT ok(pg_temp.blq('s1010_base') = 'rubrica_de_base' OR pg_temp.falt('s1010_base') LIKE '%ideRubrica%', 'S-1010: rubrica de base de cálculo não é rubrica do eSocial');
+SELECT ok(pg_temp.blq('s1010_base') = 'rubrica_de_base', 'S-1010: rubrica de base de cálculo não é rubrica do eSocial');
 
 -- ===========================================================================
 -- 5. S-1200 (remuneração)
@@ -779,10 +806,10 @@ SELECT is((pg_temp.j('s1200_t1_nao_reg') #> '{entrada,dados,demonstrativos,0,est
   '{"tpInsc": 1, "nrInsc": "11222333000181", "codLotacao": "LOT-SINT-01"}'::jsonb, 'S-1200: estabelecimento e lotação (nunca o UUID)');
 SELECT is(pg_temp.j('s1200_t1_nao_reg') #>> '{entrada,dados,demonstrativos,0,estabelecimentos,0,remuneracoes,0,matricula}', '000123', 'S-1200: matrícula do cadastro, não o UUID do contrato');
 SELECT is(pg_temp.j('s1200_t1_nao_reg') #> '{entrada,dados,demonstrativos,0,estabelecimentos,0,remuneracoes,0,itens}',
-  '[{"codRubr": "SALARIO", "ideTabRubr": "DNEX01", "vrRubr": "3000.00"}, {"codRubr": "INSS", "ideTabRubr": "DNEX01", "vrRubr": "281.25"}, {"codRubr": "IRRF", "ideTabRubr": "DNEX01", "vrRubr": "12.50"}]'::jsonb,
+  '[{"codRubr": "SALARIO", "ideTabRubr": "DNEX01", "vrRubr": "3000.00", "indApurIR": 0}, {"codRubr": "INSS", "ideTabRubr": "DNEX01", "vrRubr": "281.25", "indApurIR": 0}, {"codRubr": "IRRF", "ideTabRubr": "DNEX01", "vrRubr": "12.50", "indApurIR": 0}]'::jsonb,
   'S-1200: uma linha por rubrica do resultado, com valores em texto decimal');
 SELECT is(pg_temp.j('s1200_t1_nao_reg') #> '{entrada,dados,demonstrativos,0,infoComplCont}', '{"codCBO": "411010"}'::jsonb, 'S-1200: CBO do cargo');
-SELECT ok((pg_temp.j('s1200_t1_nao_reg') #>> '{entrada,dados}') !~ 'vr_(inss|irrf|fgts|liquido)|total_', 'S-1200: sem totais da folha nem encargos no evento');
+SELECT is((SELECT string_agg(k, ',' ORDER BY k) FROM jsonb_object_keys(pg_temp.j('s1200_t1_nao_reg') #> '{entrada,dados}') k), 'demonstrativos,indApuracao,perApur,trabalhador', 'S-1200: só os grupos do leiaute (sem totais da folha nem encargos no evento)');
 SELECT is((SELECT count(*) FROM folha.payroll_demonstrative WHERE account_id = :A), 0::bigint, 'S-1200: sem registrar, o ideDmDev não é gravado');
 SELECT pg_temp.s1200('s1200_t1', 'EA', 'T1.trab', '2026-10-01');
 SELECT is(pg_temp.est('s1200_t1'), 'pronto', 'S-1200: registrando, a entrada fica pronta');
@@ -813,6 +840,8 @@ SELECT is(pg_temp.guarda('pg_maior', pg_temp.close_a(format($q$SELECT folha.esoc
   'pagamento: o valor pago não passa do líquido do resultado');
 SELECT is(pg_temp.guarda('pg_tp2', pg_temp.close_a(format($q$SELECT folha.esocial_entrada_pagamento_registrar_v1(%L::uuid, '2026-11-05', NULL, 2::smallint)::text$q$, pg_temp.id('R1.T1')))) LIKE 'ERRO 22023%', true,
   'pagamento: tpPgto 2 só para folha de rescisão');
+SELECT is(pg_temp.guarda('pg_antes', pg_temp.close_a(format($q$SELECT folha.esocial_entrada_pagamento_registrar_v1(%L::uuid, '1900-01-01', NULL, 1::smallint)::text$q$, pg_temp.id('R1.T1')))) LIKE 'ERRO 22023%anterior à competência%', true,
+  'pagamento: data anterior à competência da folha é recusada');
 SELECT is(pg_temp.guarda('pg_sem_close', pg_temp.so(ARRAY['folha.read', 'folha.transmit'], format($q$SELECT folha.esocial_entrada_pagamento_registrar_v1(%L::uuid, '2026-11-05', NULL, 1::smallint)::text$q$, pg_temp.id('R1.T1')))) LIKE 'ERRO 42501%', true,
   'pagamento: registrar exige folha.close');
 SELECT is(pg_temp.guarda('pg_outra_conta', pg_temp.faz(pg_temp.cb(), pg_temp.todas(), '84000000-0000-0000-0000-000000000032'::uuid, format($q$SELECT folha.esocial_entrada_pagamento_registrar_v1(%L::uuid, '2026-11-05', NULL, 1::smallint)::text$q$, pg_temp.id('R1.T1')))) LIKE 'ERRO P0002%', true,
@@ -868,16 +897,24 @@ SELECT pg_temp.s1200('s1200_retif_sem_motivo', 'EA', 'T1.trab', '2026-10-01', 1:
 SELECT is(pg_temp.blq('s1200_retif_sem_motivo'), 'motivo_obrigatorio', 'S-1200: retificação exige o motivo');
 SELECT is(pg_temp.guarda('s1200_retif_sem_close', pg_temp.so(ARRAY['folha.read', 'folha.transmit'], format($q$SELECT folha.esocial_entrada_s1200_v1(%L::uuid, %L::uuid, 1::smallint, '2026-10-01', 'producao_restrita', NULL, true, %L::uuid, 'corrige')::text$q$,
   pg_temp.id('EA'), pg_temp.id('T1.trab'), pg_temp.id('s1200_t1')))) LIKE 'ERRO 42501%', true, 'S-1200: retificar exige folha.close além de folha.transmit');
+SELECT pg_temp.s1200('s1200_retif_igual', 'EA', 'T1.trab', '2026-10-01', 1::smallint, false, 's1200_t1', 'Sem mudança');
+SELECT is(pg_temp.blq('s1200_retif_igual'), 'nada_a_retificar', 'S-1200: retificar com o conteúdo idêntico ao validado é recusado (como na função da 0031)');
+UPDATE folha.contract_esocial SET cbo_cargo = '411015' WHERE contract_id = pg_temp.id('T1');
 SELECT pg_temp.s1200('s1200_retif', 'EA', 'T1.trab', '2026-10-01', 1::smallint, true, 's1200_t1', 'Correção de rubrica');
+UPDATE folha.contract_esocial SET cbo_cargo = '411010' WHERE contract_id = pg_temp.id('T1');
 SELECT is(pg_temp.est('s1200_retif'), 'pronto', 'S-1200: retificação com o recibo vigente gera a entrada');
 SELECT is(pg_temp.j('s1200_retif') #> '{entrada,dados,retificacao}', '{"nrRecibo": "1.2.0000000000000000001"}'::jsonb, 'S-1200: a retificação leva o recibo do evento validado');
 SELECT is((SELECT ind_retif || ':' || (retifica_event_id = pg_temp.id('s1200_t1'))::text || ':' || versao || ':' || estado FROM folha.esocial_event WHERE event_id = pg_temp.id('s1200_retif')),
   '2:true:2:rascunho', 'S-1200: a fila guarda a retificação como versão 2 em rascunho ligada ao original');
 SELECT pg_temp.s1200('s1200_retif_errada', 'EA', 'T1.trab', '2026-10-01', 1::smallint, false, 's1200_retif', 'x');
 SELECT is(pg_temp.blq('s1200_retif_errada'), 'retificacao_de_outra_versao', 'S-1200: só se retifica a versão validada vigente');
-SELECT pg_temp.s1200('s1200_nada_retif', 'EA', 'T2.trab', '2026-10-01', 1::smallint, false, 's1200_t1', 'x');
-SELECT is(pg_temp.blq('s1200_nada_retif'), 'nada_a_retificar', 'S-1200: sem versão validada na chave não há o que retificar');
+SELECT pg_temp.s1200('s1200_nada_retif', 'EA', 'T7.trab', '2026-10-01', 1::smallint, false, 's1200_t1', 'x');
+SELECT is(pg_temp.blq('s1200_nada_retif'), 'nada_a_retificar,sem_folha_fechada', 'S-1200: sem versão validada na chave não há o que retificar');
 -- S-1299 com periódico em andamento, depois com tudo validado
+SELECT pg_temp.s1299('s1299_sem_t2', 'EA', '2026-10-01', false);
+SELECT is(pg_temp.blq('s1299_sem_t2'), 'periodico_sem_recibo,resultado_sem_s1200', 'S-1299: remuneração em folha fechada sem S-1200 validado (T2) impede o fechamento');
+SELECT pg_temp.s1200('s1200_t2', 'EA', 'T2.trab', '2026-10-01');
+SELECT pg_temp.valida_direto('s1200_t2', '1.2.0000000000000000004');
 SELECT pg_temp.s1299('s1299_andamento', 'EA', '2026-10-01', false);
 SELECT is(pg_temp.est('s1299_andamento') || ':' || pg_temp.blq('s1299_andamento'), 'bloqueado:periodico_sem_recibo', 'S-1299: retificação do S-1200 ainda em rascunho (sem recibo) impede o fechamento');
 SELECT pg_temp.s1299('s1299_aberta', 'EA', '2026-09-01', false);
@@ -896,7 +933,7 @@ SELECT is(pg_temp.s1298('s1298_antes', 'EA', '2026-10-01', false) IS NOT NULL AN
   'S-1298: período cujo S-1299 ainda não foi validado não se reabre');
 SELECT pg_temp.valida_direto('s1299_out', '1.2.0000000000000000003');
 SELECT pg_temp.s1200('s1200_fechado', 'EA', 'T2.trab', '2026-10-01', 1::smallint, false);
-SELECT is(pg_temp.blq('s1200_fechado'), 'periodo_fechado', 'S-1200: período fechado no eSocial bloqueia evento periódico até o S-1298');
+SELECT is(pg_temp.blq('s1200_fechado'), 'ja_validado,periodo_fechado', 'S-1200: período fechado no eSocial bloqueia evento periódico até o S-1298');
 SELECT pg_temp.s1298('s1298_out', 'EA', '2026-10-01');
 SELECT is(pg_temp.est('s1298_out'), 'pronto', 'S-1298: período fechado com recibo do S-1299 guardado gera a entrada');
 SELECT is(pg_temp.j('s1298_out') #> '{entrada,dados}', '{"indApuracao": 1, "perApur": "2026-10"}'::jsonb, 'S-1298: só indApuracao e perApur (o leiaute não tem campo de recibo)');
@@ -907,11 +944,12 @@ SELECT is(pg_temp.guarda('s1298_nov', pg_temp.tx_a(format($q$SELECT folha.esocia
   'S-1298: período que nunca foi fechado não se reabre');
 -- S-1299 de novembro (S-1210 em rascunho, depois validado)
 SELECT pg_temp.s1299('s1299_nov_andamento', 'EA', '2026-11-01', false);
-SELECT is(pg_temp.blq('s1299_nov_andamento'), 'periodico_sem_recibo', 'S-1299: S-1210 do período ainda em rascunho impede o fechamento');
+SELECT is(pg_temp.blq('s1299_nov_andamento'), 'pagamento_sem_s1210,pagamento_sem_s1210,pagamento_sem_s1210,periodico_sem_recibo,processo_sem_gerador',
+  'S-1299: S-1210 de T1 em rascunho, pagamentos de T1, T2 e T7 sem S-1210 validado e folha de rescisão (sem gerador) impedem o fechamento');
 SELECT pg_temp.valida_direto('s1210_t1', '1.2.0000000000000000002');
 SELECT pg_temp.s1299('s1299_nov', 'EA', '2026-11-01', false);
-SELECT is(pg_temp.est('s1299_nov') || ':' || (pg_temp.j('s1299_nov') #>> '{entrada,dados,infoFech,evtPgtos}') || ':' || (pg_temp.j('s1299_nov') #>> '{entrada,dados,infoFech,evtRemun}'),
-  'pronto:true:false', 'S-1299: com S-1210 validado e sem S-1200 no mês, evtPgtos é verdadeiro e evtRemun falso');
+SELECT is(pg_temp.est('s1299_nov') || ':' || pg_temp.blq('s1299_nov'), 'bloqueado:pagamento_sem_s1210,pagamento_sem_s1210,processo_sem_gerador',
+  'S-1299: com o S-1210 de T1 validado, ainda bloqueia pelos pagamentos de T2 e T7 sem S-1210 e pela rescisão (o caso positivo de novembro roda no cenário do CI)');
 
 -- S-3000: recibo do evento original guardado na fila
 SELECT pg_temp.s2200('s2200_t7', 'EA', 'T7');
@@ -943,7 +981,7 @@ SELECT is(pg_temp.blq('s3000_s1299'), 'tipo_nao_excluivel_nesta_versao', 'S-3000
 SELECT pg_temp.s2200('s2200_t2', 'EA', 'T2');
 SELECT pg_temp.valida_direto('s2200_t2', '1-2-ABC');
 SELECT pg_temp.s3000('s3000_recibo_ruim', 's2200_t2', 'x', false);
-SELECT is(pg_temp.blq('s3000_recibo_ruim'), 'recibo_fora_do_formato', 'S-3000: recibo fora do formato do leiaute bloqueia');
+SELECT is(pg_temp.blq('s3000_recibo_ruim'), 'dependentes_enviados,recibo_fora_do_formato', 'S-3000: recibo fora do formato do leiaute bloqueia');
 SELECT pg_temp.s2200('s2200_t2_retif_ruim', 'EA', 'T2', false, 's2200_t2', 'x');
 SELECT is(pg_temp.blq('s2200_t2_retif_ruim'), 'recibo_fora_do_formato', 'S-2200: retificar com recibo fora do formato do leiaute bloqueia');
 SELECT is(pg_temp.guarda('s3000_outra_conta', pg_temp.tx_b(format($q$SELECT folha.esocial_entrada_s3000_v1(%L::uuid, 'x', NULL, false)::text$q$, pg_temp.id('s2200_t7')))) LIKE 'ERRO P0002%', true,
@@ -976,7 +1014,7 @@ SELECT is(pg_temp.so(ARRAY['folha.read', 'folha.calculate'], c.sql) LIKE 'ERRO 4
   FROM chamadas c ORDER BY c.nome;
 SELECT is(pg_temp.pedido(NULL, NULL, NULL, false, false, ARRAY[c.sql]) LIKE 'ERRO 42501%', true, c.nome || ': sem contexto da Folha é recusado com 42501')
   FROM chamadas c ORDER BY c.nome;
-SELECT is(pg_temp.tx_b(c.sql) LIKE 'ERRO %' AND pg_temp.tx_b(c.sql) NOT LIKE 'ERRO 42501%', true, c.nome || ': com o contexto da conta B os ids da conta A não existem (nada vaza)')
+SELECT is(pg_temp.tx_b(c.sql) ~ '^ERRO (22023|P0002): .*(não encontrad|não é deste|não tem contrato)', true, c.nome || ': com o contexto da conta B os ids da conta A não existem (nada vaza)')
   FROM chamadas c ORDER BY c.nome;
 SELECT is((SELECT count(*) FROM folha.esocial_event WHERE account_id = :B), 0::bigint, 'nenhuma chamada recusada deixou evento na conta B');
 
@@ -1026,7 +1064,7 @@ SELECT is((SELECT count(*) FROM folha.esocial_entrada e WHERE e.estado = 'pronto
   'entrada: o evento do envelope é o do registro');
 SELECT is((SELECT count(*) FROM folha.esocial_entrada e WHERE e.estado <> 'pronto' AND e.entrada IS NOT NULL), 0::bigint,
   'entrada: incompleta ou bloqueada nunca guarda entrada (nada de valor inventado)');
-SELECT is((SELECT count(*) FROM folha.esocial_entrada e WHERE e.estado = 'pronto' AND e.entrada::text ~ '"[a-zA-Z]+": ("|\[|\{)(""|\[\]|\{\})'), 0::bigint,
+SELECT is((SELECT count(*) FROM folha.esocial_entrada e WHERE e.estado = 'pronto' AND jsonb_path_exists(e.entrada, '$.** ? (@ == "" || (@.type() == "array" && @.size() == 0) || (@.type() == "object" && @.size() == 0))')), 0::bigint,
   'entrada: nenhum campo com texto vazio, lista vazia ou objeto vazio');
 SELECT is((SELECT count(DISTINCT evento_codigo) FROM folha.esocial_entrada WHERE estado = 'pronto' AND account_id = :A), 10::bigint,
   'as dez entradas (S-1000, S-1005, S-1010, S-1020, S-1200, S-1210, S-2200, S-1298, S-1299, S-3000) tiveram caminho feliz neste arquivo');
